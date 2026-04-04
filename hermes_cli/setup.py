@@ -1912,7 +1912,7 @@ def setup_gateway(config: dict):
             existing_discord = None
 
     if not existing_discord and prompt_yes_no("Set up Discord bot?", False):
-        print_info("Create a bot at https://discord.com/developers/applications")
+        print_info("Create a bot by following https://hermes-agent.nousresearch.com/docs/user-guide/messaging/discord#step-1-create-a-discord-application")
         token = prompt("Discord bot token", password=True)
         if token:
             save_env_value("DISCORD_BOT_TOKEN", token)
