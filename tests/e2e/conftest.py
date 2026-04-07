@@ -90,6 +90,7 @@ def make_runner(session_entry: SessionEntry) -> "GatewayRunner":
     runner._reasoning_config = None
     runner._provider_routing = {}
     runner._fallback_model = None
+    runner._session_model_overrides = {}
     runner._show_reasoning = False
 
     runner._is_user_authorized = lambda _source: True

@@ -13,6 +13,7 @@ import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
+import yaml
 
 from gateway.platforms.base import SendResult
 from tests.e2e.conftest import (
@@ -111,6 +112,34 @@ class TestTelegramSlashCommands:
         send.assert_called_once()
         response_text = send.call_args[1].get("content") or send.call_args[0][1]
         assert "provider" in response_text.lower()
+
+    @pytest.mark.asyncio
+    async def test_provider_uses_session_override(self, adapter, runner, source, tmp_path, monkeypatch):
+        import gateway.run as gateway_run
+
+        monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump({
+                "model": {
+                    "provider": "openrouter",
+                    "base_url": "https://openrouter.ai/api/v1",
+                }
+            }),
+            encoding="utf-8",
+        )
+
+        session_key = runner._session_key_for_source(source)
+        runner._session_model_overrides[session_key] = {
+            "provider": "anthropic",
+            "base_url": "https://api.anthropic.com",
+        }
+
+        send = await send_and_capture(adapter, "/provider")
+
+        send.assert_called_once()
+        response_text = send.call_args[1].get("content") or send.call_args[0][1]
+        assert "`anthropic`" in response_text
+        assert "← active" in response_text
 
     @pytest.mark.asyncio
     async def test_verbose_responds(self, adapter):

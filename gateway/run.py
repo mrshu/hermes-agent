@@ -3785,6 +3785,7 @@ class GatewayRunner:
 
         # Resolve current provider from config
         current_provider = "openrouter"
+        current_base_url = ""
         model_cfg = {}
         config_path = _hermes_home / 'config.yaml'
         try:
@@ -3794,8 +3795,16 @@ class GatewayRunner:
                 model_cfg = cfg.get("model", {})
                 if isinstance(model_cfg, dict):
                     current_provider = model_cfg.get("provider", current_provider)
+                    current_base_url = model_cfg.get("base_url", "")
         except Exception:
             pass
+
+        source = event.source
+        session_key = self._session_key_for_source(source)
+        override = getattr(self, "_session_model_overrides", {}).get(session_key, {})
+        if override:
+            current_provider = override.get("provider", current_provider)
+            current_base_url = override.get("base_url", current_base_url)
 
         current_provider = normalize_provider(current_provider)
         if current_provider == "auto":
@@ -3807,7 +3816,9 @@ class GatewayRunner:
 
         # Detect custom endpoint from config base_url
         if current_provider == "openrouter":
-            _cfg_base = model_cfg.get("base_url", "") if isinstance(model_cfg, dict) else ""
+            _cfg_base = current_base_url or (
+                model_cfg.get("base_url", "") if isinstance(model_cfg, dict) else ""
+            )
             if _cfg_base and "openrouter.ai" not in _cfg_base:
                 current_provider = "custom"
 
