@@ -1126,6 +1126,7 @@ class GatewayRunner:
             # Set up message + fatal error handlers
             adapter.set_message_handler(self._handle_message)
             adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
+            adapter.set_approval_authorizer(self._is_user_authorized)
             adapter.set_session_store(self.session_store)
             
             # Try to connect
@@ -1424,6 +1425,7 @@ class GatewayRunner:
 
                     adapter.set_message_handler(self._handle_message)
                     adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
+                    adapter.set_approval_authorizer(self._is_user_authorized)
                     adapter.set_session_store(self.session_store)
 
                     success = await adapter.connect()
@@ -6800,6 +6802,10 @@ class GatewayRunner:
 
                 cmd = approval_data.get("command", "")
                 desc = approval_data.get("description", "dangerous command")
+                approval_meta = dict(_status_thread_metadata or {})
+                request_id = approval_data.get("request_id")
+                if request_id:
+                    approval_meta["approval_request_id"] = request_id
 
                 # Prefer button-based approval when the adapter supports it.
                 # Check the *class* for the method, not the instance — avoids
@@ -6812,7 +6818,7 @@ class GatewayRunner:
                                 command=cmd,
                                 session_key=_approval_session_key,
                                 description=desc,
-                                metadata=_status_thread_metadata,
+                                metadata=approval_meta or None,
                             ),
                             _loop_for_step,
                         ).result(timeout=15)

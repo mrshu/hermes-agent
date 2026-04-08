@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from typing import Dict, Optional, Any
 
 try:
@@ -32,6 +33,7 @@ from pathlib import Path as _Path
 sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
 
 from gateway.config import Platform, PlatformConfig
+from gateway.session import SessionSource
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -87,6 +89,7 @@ class SlackAdapter(BasePlatformAdapter):
         # Track pending approval message_ts → resolved flag to prevent
         # double-clicks on approval buttons.
         self._approval_resolved: Dict[str, bool] = {}
+        self._approval_state: Dict[str, Dict[str, str]] = {}
         # Track timestamps of messages sent by the bot so we can respond
         # to thread replies even without an explicit @mention.
         self._bot_message_ts: set = set()
@@ -997,6 +1000,12 @@ class SlackAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
 
         try:
+            request_id = ""
+            if metadata:
+                request_id = str(metadata.get("approval_request_id", "") or "")
+            if not request_id:
+                request_id = uuid.uuid4().hex
+
             cmd_preview = command[:2900] + "..." if len(command) > 2900 else command
             thread_ts = self._resolve_thread_ts(None, metadata)
 
@@ -1020,26 +1029,26 @@ class SlackAdapter(BasePlatformAdapter):
                             "text": {"type": "plain_text", "text": "Allow Once"},
                             "style": "primary",
                             "action_id": "hermes_approve_once",
-                            "value": session_key,
+                            "value": request_id,
                         },
                         {
                             "type": "button",
                             "text": {"type": "plain_text", "text": "Allow Session"},
                             "action_id": "hermes_approve_session",
-                            "value": session_key,
+                            "value": request_id,
                         },
                         {
                             "type": "button",
                             "text": {"type": "plain_text", "text": "Always Allow"},
                             "action_id": "hermes_approve_always",
-                            "value": session_key,
+                            "value": request_id,
                         },
                         {
                             "type": "button",
                             "text": {"type": "plain_text", "text": "Deny"},
                             "style": "danger",
                             "action_id": "hermes_deny",
-                            "value": session_key,
+                            "value": request_id,
                         },
                     ],
                 },
@@ -1057,6 +1066,7 @@ class SlackAdapter(BasePlatformAdapter):
             msg_ts = result.get("ts", "")
             if msg_ts:
                 self._approval_resolved[msg_ts] = False
+            self._approval_state[request_id] = {"session_key": session_key}
 
             return SendResult(success=True, message_id=msg_ts, raw_response=result)
         except Exception as e:
@@ -1068,10 +1078,11 @@ class SlackAdapter(BasePlatformAdapter):
         await ack()
 
         action_id = action.get("action_id", "")
-        session_key = action.get("value", "")
+        request_id = action.get("value", "")
         message = body.get("message", {})
         msg_ts = message.get("ts", "")
         channel_id = body.get("channel", {}).get("id", "")
+        user_id = body.get("user", {}).get("id", "")
         user_name = body.get("user", {}).get("name", "unknown")
 
         # Map action_id to approval choice
@@ -1083,19 +1094,36 @@ class SlackAdapter(BasePlatformAdapter):
         }
         choice = choice_map.get(action_id, "deny")
 
+        state = self._approval_state.get(request_id)
+        if not state:
+            return
+
+        if not self.is_approval_actor_authorized(SessionSource(
+            platform=Platform.SLACK,
+            chat_id=channel_id,
+            chat_type="group",
+            user_id=user_id or None,
+            user_name=user_name,
+        )):
+            logger.warning(
+                "Rejected unauthorized Slack approval click (request=%s, user=%s)",
+                request_id,
+                user_id,
+            )
+            return
+
         # Prevent double-clicks
         if self._approval_resolved.get(msg_ts, False):
             return
         self._approval_resolved[msg_ts] = True
 
-        # Update the message to show the decision and remove buttons
         label_map = {
             "once": f"✅ Approved once by {user_name}",
             "session": f"✅ Approved for session by {user_name}",
             "always": f"✅ Approved permanently by {user_name}",
             "deny": f"❌ Denied by {user_name}",
         }
-        decision_text = label_map.get(choice, f"Resolved by {user_name}")
+        decision_text = "⏱ Approval expired"
 
         # Get original text from the section block
         original_text = ""
@@ -1120,6 +1148,27 @@ class SlackAdapter(BasePlatformAdapter):
             },
         ]
 
+        # Resolve the approval — this unblocks the agent thread
+        try:
+            from tools.approval import resolve_gateway_approval
+            count = resolve_gateway_approval(
+                state["session_key"],
+                choice,
+                request_id=request_id,
+            )
+            if count:
+                decision_text = label_map.get(choice, f"Resolved by {user_name}")
+            logger.info(
+                "Slack button resolved %d approval(s) for request %s (choice=%s, user=%s)",
+                count, request_id, choice, user_name,
+            )
+        except Exception as exc:
+            logger.error("Failed to resolve gateway approval from Slack button: %s", exc)
+        finally:
+            self._approval_state.pop(request_id, None)
+
+        updated_blocks[1]["elements"][0]["text"] = decision_text
+
         try:
             await self._get_client(channel_id).chat_update(
                 channel=channel_id,
@@ -1129,17 +1178,6 @@ class SlackAdapter(BasePlatformAdapter):
             )
         except Exception as e:
             logger.warning("[Slack] Failed to update approval message: %s", e)
-
-        # Resolve the approval — this unblocks the agent thread
-        try:
-            from tools.approval import resolve_gateway_approval
-            count = resolve_gateway_approval(session_key, choice)
-            logger.info(
-                "Slack button resolved %d approval(s) for session %s (choice=%s, user=%s)",
-                count, session_key, choice, user_name,
-            )
-        except Exception as exc:
-            logger.error("Failed to resolve gateway approval from Slack button: %s", exc)
 
         # Clean up stale approval state
         self._approval_resolved.pop(msg_ts, None)

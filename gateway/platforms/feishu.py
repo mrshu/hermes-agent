@@ -87,6 +87,7 @@ FEISHU_WEBSOCKET_AVAILABLE = websockets is not None
 FEISHU_WEBHOOK_AVAILABLE = aiohttp is not None
 
 from gateway.config import Platform, PlatformConfig
+from gateway.session import SessionSource
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -1053,9 +1054,8 @@ class FeishuAdapter(BasePlatformAdapter):
         self._media_batch_state = FeishuBatchState()
         self._pending_media_batches = self._media_batch_state.events
         self._pending_media_batch_tasks = self._media_batch_state.tasks
-        # Exec approval button state (approval_id → {session_key, message_id, chat_id})
-        self._approval_state: Dict[int, Dict[str, str]] = {}
-        self._approval_counter = itertools.count(1)
+        # Exec approval button state (request_id → {session_key, message_id, chat_id})
+        self._approval_state: Dict[str, Dict[str, str]] = {}
         self._load_seen_message_ids()
 
     @staticmethod
@@ -1413,7 +1413,11 @@ class FeishuAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
 
         try:
-            approval_id = next(self._approval_counter)
+            request_id = ""
+            if metadata:
+                request_id = str(metadata.get("approval_request_id", "") or "")
+            if not request_id:
+                request_id = uuid.uuid4().hex
             cmd_preview = command[:3000] + "..." if len(command) > 3000 else command
 
             def _btn(label: str, action_name: str, btn_type: str = "default") -> dict:
@@ -1421,7 +1425,7 @@ class FeishuAdapter(BasePlatformAdapter):
                     "tag": "button",
                     "text": {"tag": "plain_text", "content": label},
                     "type": btn_type,
-                    "value": {"hermes_action": action_name, "approval_id": approval_id},
+                    "value": {"hermes_action": action_name, "approval_id": request_id},
                 }
 
             card = {
@@ -1458,10 +1462,11 @@ class FeishuAdapter(BasePlatformAdapter):
 
             result = self._finalize_send_result(response, "send_exec_approval failed")
             if result.success:
-                self._approval_state[approval_id] = {
+                self._approval_state[request_id] = {
                     "session_key": session_key,
                     "message_id": result.message_id or "",
                     "chat_id": chat_id,
+                    "request_id": request_id,
                 }
             return result
         except Exception as exc:
@@ -1927,9 +1932,23 @@ class FeishuAdapter(BasePlatformAdapter):
         hermes_action = action_value.get("hermes_action") if isinstance(action_value, dict) else None
         if hermes_action:
             approval_id = action_value.get("approval_id")
-            state = self._approval_state.pop(approval_id, None)
+            state = self._approval_state.get(approval_id)
             if not state:
                 logger.debug("[Feishu] Approval %s already resolved or unknown", approval_id)
+                return
+
+            if not self.is_approval_actor_authorized(SessionSource(
+                platform=Platform.FEISHU,
+                chat_id=state.get("chat_id", chat_id),
+                chat_type="group",
+                user_id=open_id,
+                user_name=open_id,
+            )):
+                logger.warning(
+                    "Rejected unauthorized Feishu approval click (request=%s, user=%s)",
+                    approval_id,
+                    open_id,
+                )
                 return
 
             choice_map = {
@@ -1946,7 +1965,7 @@ class FeishuAdapter(BasePlatformAdapter):
                 "always": "Approved permanently",
                 "deny": "Denied",
             }
-            label = label_map.get(choice, "Resolved")
+            label = "Approval expired"
 
             # Resolve sender name for the status card
             sender_id = SimpleNamespace(open_id=open_id, user_id=None, union_id=None)
@@ -1956,13 +1975,21 @@ class FeishuAdapter(BasePlatformAdapter):
             # Resolve the approval — unblocks the agent thread
             try:
                 from tools.approval import resolve_gateway_approval
-                count = resolve_gateway_approval(state["session_key"], choice)
+                count = resolve_gateway_approval(
+                    state["session_key"],
+                    choice,
+                    request_id=state.get("request_id"),
+                )
+                if count:
+                    label = label_map.get(choice, "Resolved")
                 logger.info(
-                    "Feishu button resolved %d approval(s) for session %s (choice=%s, user=%s)",
-                    count, state["session_key"], choice, user_name,
+                    "Feishu button resolved %d approval(s) for request %s (choice=%s, user=%s)",
+                    count, state.get("request_id"), choice, user_name,
                 )
             except Exception as exc:
                 logger.error("Failed to resolve gateway approval from Feishu button: %s", exc)
+            finally:
+                self._approval_state.pop(approval_id, None)
 
             # Update the card to show the decision
             await self._update_approval_card(state.get("message_id", ""), label, user_name, choice)

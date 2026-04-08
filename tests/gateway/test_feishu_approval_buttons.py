@@ -121,6 +121,10 @@ class TestFeishuExecApproval:
         assert action_names == [
             "approve_once", "approve_session", "approve_always", "deny"
         ]
+        request_ids = {a["value"]["approval_id"] for a in actions}
+        assert len(request_ids) == 1
+        request_id = request_ids.pop()
+        assert adapter._approval_state[request_id]["session_key"] == "agent:main:feishu:group:oc_12345"
 
     @pytest.mark.asyncio
     async def test_stores_approval_state(self):
@@ -212,14 +216,15 @@ class TestFeishuApprovalCallback:
     @pytest.mark.asyncio
     async def test_resolves_approval_on_click(self):
         adapter = _make_adapter()
-        adapter._approval_state[1] = {
+        adapter._approval_state["req-1"] = {
             "session_key": "agent:main:feishu:group:oc_12345",
             "message_id": "msg_001",
             "chat_id": "oc_12345",
+            "request_id": "req-1",
         }
 
         data = _make_card_action_data(
-            action_value={"hermes_action": "approve_once", "approval_id": 1},
+            action_value={"hermes_action": "approve_once", "approval_id": "req-1"},
         )
 
         with (
@@ -232,23 +237,28 @@ class TestFeishuApprovalCallback:
         ):
             await adapter._handle_card_action_event(data)
 
-        mock_resolve.assert_called_once_with("agent:main:feishu:group:oc_12345", "once")
+        mock_resolve.assert_called_once_with(
+            "agent:main:feishu:group:oc_12345",
+            "once",
+            request_id="req-1",
+        )
         mock_update.assert_called_once_with("msg_001", "Approved once", "Norbert", "once")
 
         # State should be cleaned up
-        assert 1 not in adapter._approval_state
+        assert "req-1" not in adapter._approval_state
 
     @pytest.mark.asyncio
     async def test_deny_button(self):
         adapter = _make_adapter()
-        adapter._approval_state[2] = {
+        adapter._approval_state["req-2"] = {
             "session_key": "some-session",
             "message_id": "msg_002",
             "chat_id": "oc_12345",
+            "request_id": "req-2",
         }
 
         data = _make_card_action_data(
-            action_value={"hermes_action": "deny", "approval_id": 2},
+            action_value={"hermes_action": "deny", "approval_id": "req-2"},
             token="tok_deny",
         )
 
@@ -262,20 +272,21 @@ class TestFeishuApprovalCallback:
         ):
             await adapter._handle_card_action_event(data)
 
-        mock_resolve.assert_called_once_with("some-session", "deny")
+        mock_resolve.assert_called_once_with("some-session", "deny", request_id="req-2")
         mock_update.assert_called_once_with("msg_002", "Denied", "Alice", "deny")
 
     @pytest.mark.asyncio
     async def test_session_approval(self):
         adapter = _make_adapter()
-        adapter._approval_state[3] = {
+        adapter._approval_state["req-3"] = {
             "session_key": "sess-3",
             "message_id": "msg_003",
             "chat_id": "oc_99",
+            "request_id": "req-3",
         }
 
         data = _make_card_action_data(
-            action_value={"hermes_action": "approve_session", "approval_id": 3},
+            action_value={"hermes_action": "approve_session", "approval_id": "req-3"},
             token="tok_ses",
         )
 
@@ -289,20 +300,21 @@ class TestFeishuApprovalCallback:
         ):
             await adapter._handle_card_action_event(data)
 
-        mock_resolve.assert_called_once_with("sess-3", "session")
+        mock_resolve.assert_called_once_with("sess-3", "session", request_id="req-3")
         mock_update.assert_called_once_with("msg_003", "Approved for session", "Bob", "session")
 
     @pytest.mark.asyncio
     async def test_always_approval(self):
         adapter = _make_adapter()
-        adapter._approval_state[4] = {
+        adapter._approval_state["req-4"] = {
             "session_key": "sess-4",
             "message_id": "msg_004",
             "chat_id": "oc_55",
+            "request_id": "req-4",
         }
 
         data = _make_card_action_data(
-            action_value={"hermes_action": "approve_always", "approval_id": 4},
+            action_value={"hermes_action": "approve_always", "approval_id": "req-4"},
             token="tok_alw",
         )
 
@@ -316,7 +328,7 @@ class TestFeishuApprovalCallback:
         ):
             await adapter._handle_card_action_event(data)
 
-        mock_resolve.assert_called_once_with("sess-4", "always")
+        mock_resolve.assert_called_once_with("sess-4", "always", request_id="req-4")
 
     @pytest.mark.asyncio
     async def test_already_resolved_drops_silently(self):
@@ -324,7 +336,7 @@ class TestFeishuApprovalCallback:
         # No state for approval_id 99 — already resolved
 
         data = _make_card_action_data(
-            action_value={"hermes_action": "approve_once", "approval_id": 99},
+            action_value={"hermes_action": "approve_once", "approval_id": "req-missing"},
             token="tok_gone",
         )
 
@@ -333,6 +345,33 @@ class TestFeishuApprovalCallback:
 
         # Should NOT resolve — already handled
         mock_resolve.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unauthorized_click_does_not_resolve(self):
+        adapter = _make_adapter()
+        adapter._approval_state["req-auth"] = {
+            "session_key": "sess-auth",
+            "message_id": "msg_auth",
+            "chat_id": "oc_12345",
+            "request_id": "req-auth",
+        }
+        adapter.set_approval_authorizer(lambda source: False)
+
+        data = _make_card_action_data(
+            action_value={"hermes_action": "approve_once", "approval_id": "req-auth"},
+            token="tok_auth",
+            open_id="ou_bad",
+        )
+
+        with (
+            patch.object(adapter, "_update_approval_card", new_callable=AsyncMock) as mock_update,
+            patch("tools.approval.resolve_gateway_approval") as mock_resolve,
+        ):
+            await adapter._handle_card_action_event(data)
+
+        mock_resolve.assert_not_called()
+        mock_update.assert_not_called()
+        assert "req-auth" in adapter._approval_state
 
     @pytest.mark.asyncio
     async def test_non_approval_actions_route_normally(self):
