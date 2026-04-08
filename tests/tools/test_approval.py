@@ -714,5 +714,3 @@ class TestNormalizationBypass:
         cmd = "\uff4c\uff53 -\uff4c\uff41 /tmp"
         dangerous, key, desc = detect_dangerous_command(cmd)
         assert dangerous is False
-
-

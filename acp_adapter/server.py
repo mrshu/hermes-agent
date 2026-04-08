@@ -386,8 +386,6 @@ class HermesACPAgent(acp.Agent):
             state.cancel_event.clear()
 
         tool_call_ids: dict[str, Deque[str]] = defaultdict(deque)
-        previous_approval_cb = None
-
         if conn:
             tool_progress_cb = make_tool_progress_cb(conn, session_id, loop, tool_call_ids)
             thinking_cb = make_thinking_cb(conn, session_id, loop)
@@ -407,16 +405,13 @@ class HermesACPAgent(acp.Agent):
         agent.step_callback = step_cb
         agent.message_callback = message_cb
 
-        if approval_cb:
-            try:
-                from tools import terminal_tool as _terminal_tool
-                previous_approval_cb = getattr(_terminal_tool, "_approval_callback", None)
-                _terminal_tool.set_approval_callback(approval_cb)
-            except Exception:
-                logger.debug("Could not set ACP approval callback", exc_info=True)
-
         def _run_agent() -> dict:
+            previous_approval_cb = None
             try:
+                if approval_cb:
+                    from tools import terminal_tool as _terminal_tool
+                    previous_approval_cb = _terminal_tool.get_approval_callback()
+                    _terminal_tool.set_approval_callback(approval_cb)
                 result = agent.run_conversation(
                     user_message=user_text,
                     conversation_history=state.history,

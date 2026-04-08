@@ -115,9 +115,10 @@ _cached_sudo_password: str = ""
 # instead of the default /dev/tty or input() readers. The CLI registers these
 # so prompts route through prompt_toolkit's event loop.
 #   _sudo_password_callback() -> str  (return password or "" to skip)
-#   _approval_callback(command, description) -> str  ("once"/"session"/"always"/"deny")
+#   current-thread approval callback(command, description, **kwargs) -> str
+#       ("once"/"session"/"always"/"deny")
 _sudo_password_callback = None
-_approval_callback = None
+_approval_callback_state = threading.local()
 
 
 def set_sudo_password_callback(cb):
@@ -128,8 +129,12 @@ def set_sudo_password_callback(cb):
 
 def set_approval_callback(cb):
     """Register a callback for dangerous command approval prompts (used by CLI)."""
-    global _approval_callback
-    _approval_callback = cb
+    _approval_callback_state.callback = cb
+
+
+def get_approval_callback():
+    """Return the approval callback for the current thread, if any."""
+    return getattr(_approval_callback_state, "callback", None)
 
 # =============================================================================
 # Dangerous Command Approval System
@@ -145,7 +150,7 @@ from tools.approval import (
 def _check_all_guards(command: str, env_type: str) -> dict:
     """Delegate to consolidated guard (tirith + dangerous cmd) with CLI callback."""
     return _check_all_guards_impl(command, env_type,
-                                  approval_callback=_approval_callback)
+                                  approval_callback=get_approval_callback())
 
 
 # Allowlist: characters that can legitimately appear in directory paths.
