@@ -12,40 +12,40 @@ This page is the top-level map of Hermes Agent internals. Use it to orient yours
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────┐
-│                        Entry Points                                  │
-│                                                                      │
+│                        Entry Points                                 │
+│                                                                     │
 │  CLI (cli.py)    Gateway (gateway/run.py)    ACP (acp_adapter/)     │
-│  Batch Runner    API Server                  Python Library          │
-└──────────┬──────────────┬───────────────────────┬────────────────────┘
+│  Batch Runner    API Server                  Python Library         │
+└──────────┬──────────────┬───────────────────────┬───────────────────┘
            │              │                       │
            ▼              ▼                       ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                     AIAgent (run_agent.py)                           │
-│                                                                      │
-│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐                │
-│  │ Prompt        │ │ Provider     │ │ Tool         │                │
-│  │ Builder       │ │ Resolution   │ │ Dispatch     │                │
-│  │ (prompt_      │ │ (runtime_    │ │ (model_      │                │
-│  │  builder.py)  │ │  provider.py)│ │  tools.py)   │                │
-│  └──────┬───────┘ └──────┬───────┘ └──────┬───────┘                │
-│         │                │                │                          │
-│  ┌──────┴───────┐ ┌──────┴───────┐ ┌──────┴───────┐                │
-│  │ Compression  │ │ 3 API Modes  │ │ Tool Registry│                │
-│  │ & Caching    │ │ chat_compl.  │ │ (registry.py)│                │
-│  │              │ │ codex_resp.  │ │ 48 tools     │                │
+│                     AIAgent (run_agent.py)                          │
+│                                                                     │
+│  ┌──────────────┐ ┌───────────────┐ ┌──────────────┐                │
+│  │ Prompt       │ │ Provider      │ │ Tool         │                │
+│  │ Builder      │ │ Resolution    │ │ Dispatch     │                │
+│  │ (prompt_     │ │ (runtime_     │ │ (model_      │                │
+│  │  builder.py) │ │  provider.py) │ │  tools.py)   │                │
+│  └──────┬───────┘ └──────┬────────┘ └──────┬───────┘                │
+│         │                │                 │                        │
+│  ┌──────┴───────┐ ┌──────┴───────┐ ┌───────┴───────┐                │
+│  │ Compression  │ │ 3 API Modes  │ │ Tool Registry │                │
+│  │ & Caching    │ │ chat_compl.  │ │ (registry.py) │                │
+│  │              │ │ codex_resp.  │ │ 48 tools      │                │
 │  │              │ │ anthropic    │ │ 40 toolsets   │                │
-│  └──────────────┘ └──────────────┘ └──────────────┘                │
+│  └──────────────┘ └──────────────┘ └───────────────┘                │
 └─────────────────────────────────────────────────────────────────────┘
            │                                    │
            ▼                                    ▼
-┌───────────────────┐              ┌──────────────────────┐
+┌───────────────────┐              ┌───────────────────────┐
 │ Session Storage   │              │ Tool Backends         │
 │ (SQLite + FTS5)   │              │ Terminal (6 backends) │
 │ hermes_state.py   │              │ Browser (5 backends)  │
 │ gateway/session.py│              │ Web (4 backends)      │
 └───────────────────┘              │ MCP (dynamic)         │
                                    │ File, Vision, etc.    │
-                                   └──────────────────────┘
+                                   └───────────────────────┘
 ```
 
 ## Directory Structure

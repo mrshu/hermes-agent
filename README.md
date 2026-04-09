@@ -62,6 +62,19 @@ hermes doctor       # Diagnose any issues
 
 📖 **[Full documentation →](https://hermes-agent.nousresearch.com/docs/)**
 
+## Extending Hermes
+
+Hermes can be extended without patching core code:
+
+```bash
+hermes plugins install owner/repo   # Install a custom plugin from Git
+hermes plugins                      # Enable or disable installed plugins
+```
+
+- Build or install plugins: [Plugins](https://hermes-agent.nousresearch.com/docs/user-guide/features/plugins)
+- Author your own plugin: [Build a Hermes Plugin](https://hermes-agent.nousresearch.com/docs/guides/build-a-hermes-plugin)
+- Add a brand-new messaging platform: [Adding a Platform](https://github.com/NousResearch/hermes-agent/blob/main/gateway/platforms/ADDING_A_PLATFORM.md)
+
 ## CLI vs Messaging Quick Reference
 
 Hermes has two entry points: start the terminal UI with `hermes`, or run the gateway and talk to it from Telegram, Discord, Slack, WhatsApp, Signal, or Email. Once you're in a conversation, many slash commands are shared across both interfaces.

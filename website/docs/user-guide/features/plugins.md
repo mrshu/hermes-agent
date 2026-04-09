@@ -64,10 +64,15 @@ def register(ctx):
         name = params.get("name", "World")
         return f"Hello, {name}! 👋  (from the hello-world plugin)"
 
-    ctx.register_tool("hello_world", schema, handle_hello)
+    ctx.register_tool(
+        name="hello_world",
+        toolset="hello-world",
+        schema=schema,
+        handler=handle_hello,
+    )
 
     # --- Hook: log every tool call ---
-    def on_tool_call(tool_name, params, result):
+    def on_tool_call(tool_name, args, result, task_id=None):
         print(f"[hello-world] tool called: {tool_name}")
 
     ctx.register_hook("post_tool_call", on_tool_call)
