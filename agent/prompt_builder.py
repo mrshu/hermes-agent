@@ -336,10 +336,12 @@ PLATFORM_HINTS = {
     ),
     "webex": (
         "You are in a Webex space communicating with your user. "
-        "Webex supports plain text and markdown. In group spaces, bots typically "
-        "respond when they are directly mentioned; in direct spaces they can reply "
-        "normally. You can send media files natively: include MEDIA:/absolute/path/to/file "
-        "in your response. Images and documents are sent as native file attachments."
+        "Webex supports plain text and markdown. In direct spaces you can reply "
+        "normally. In group spaces, free-form chat usually requires the bot to be "
+        "directly mentioned, but Hermes slash commands can be used directly. Do not "
+        "echo internal speaker labels such as [Name] back to the user. You can send "
+        "media files natively: include MEDIA:/absolute/path/to/file in your response. "
+        "Images and documents are sent as native file attachments."
     ),
     "signal": (
         "You are on a text messaging communication platform, Signal. "

@@ -187,6 +187,82 @@ class TestWebexEventBuilding:
 
         assert event is None
 
+    @pytest.mark.asyncio
+    async def test_build_event_allows_bare_group_slash_command(self):
+        adapter = _make_adapter()
+
+        async def _fake_api_get(path):
+            if path == "rooms/Y2lzY29zcGFyazovL3VzL1JPT00vroom":
+                return {
+                    "id": "Y2lzY29zcGFyazovL3VzL1JPT00vroom",
+                    "title": "Incident Room",
+                    "type": "group",
+                }
+            if path == "people/person-1":
+                return {"displayName": "Alice"}
+            raise AssertionError(f"Unexpected path: {path}")
+
+        adapter._api_get_json = AsyncMock(side_effect=_fake_api_get)
+        adapter._download_attachments = AsyncMock(return_value=([], []))
+
+        event = await adapter._build_event(
+            {
+                "resource": "messages",
+                "event": "created",
+                "data": {
+                    "id": "msg-4",
+                    "roomId": "Y2lzY29zcGFyazovL3VzL1JPT00vroom",
+                    "roomType": "group",
+                    "personId": "person-1",
+                    "personEmail": "user@example.com",
+                    "text": "/sethome",
+                    "files": [],
+                },
+            }
+        )
+
+        assert event is not None
+        assert event.text == "/sethome"
+        assert event.message_type.value == "command"
+
+    @pytest.mark.asyncio
+    async def test_build_event_normalizes_mention_space_command(self):
+        adapter = _make_adapter()
+
+        async def _fake_api_get(path):
+            if path == "rooms/Y2lzY29zcGFyazovL3VzL1JPT00vroom":
+                return {
+                    "id": "Y2lzY29zcGFyazovL3VzL1JPT00vroom",
+                    "title": "Incident Room",
+                    "type": "group",
+                }
+            if path == "people/person-1":
+                return {"displayName": "Alice"}
+            raise AssertionError(f"Unexpected path: {path}")
+
+        adapter._api_get_json = AsyncMock(side_effect=_fake_api_get)
+        adapter._download_attachments = AsyncMock(return_value=([], []))
+
+        event = await adapter._build_event(
+            {
+                "resource": "messages",
+                "event": "created",
+                "data": {
+                    "id": "msg-5",
+                    "roomId": "Y2lzY29zcGFyazovL3VzL1JPT00vroom",
+                    "roomType": "group",
+                    "personId": "person-1",
+                    "personEmail": "user@example.com",
+                    "text": "Hermes /sethome",
+                    "files": [],
+                },
+            }
+        )
+
+        assert event is not None
+        assert event.text == "/sethome"
+        assert event.message_type.value == "command"
+
 
 class TestWebexSend:
     @pytest.mark.asyncio

@@ -146,6 +146,36 @@ class TestBasePlatformTopicSessions:
         ]
 
     @pytest.mark.asyncio
+    async def test_process_message_background_strips_leaked_shared_thread_prefix(self):
+        adapter = DummyTelegramAdapter()
+
+        async def handler(_event):
+            await asyncio.sleep(0)
+            return "[Alice] Up to you — I'm ready."
+
+        async def hold_typing(_chat_id, interval=2.0, metadata=None):
+            await asyncio.Event().wait()
+
+        adapter.set_message_handler(handler)
+        adapter._keep_typing = hold_typing
+
+        event = MessageEvent(
+            text="hello",
+            source=SessionSource(
+                platform=Platform.TELEGRAM,
+                chat_id="-1001",
+                chat_type="group",
+                thread_id="17585",
+                user_name="Alice",
+            ),
+            message_id="1",
+        )
+
+        await adapter._process_message_background(event, build_session_key(event.source))
+
+        assert adapter.sent[-1]["content"] == "Up to you — I'm ready."
+
+    @pytest.mark.asyncio
     async def test_process_message_background_marks_total_send_failure_unsuccessful(self):
         adapter = DummyTelegramAdapter()
 

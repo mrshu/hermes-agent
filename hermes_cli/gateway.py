@@ -2471,7 +2471,7 @@ _PLATFORMS = [
             "3. Run `npm install` in the repo root once so the Webex JS SDK listener is available",
             "4. WebSocket mode is recommended and does not require a public URL",
             "5. Invite the bot to the Webex spaces where you want Hermes to respond",
-            "6. In group spaces, Hermes will respond when @mentioned; in direct spaces it will reply normally",
+            "6. In group spaces, free-form chat requires an @mention; Hermes slash commands still work directly",
             "7. Webhook mode is optional if you specifically want callback delivery and have a public HTTPS URL",
             "8. To set a home room later, copy a room ID from an existing conversation or send a message first",
         ],

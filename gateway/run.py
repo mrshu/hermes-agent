@@ -4607,6 +4607,25 @@ class GatewayRunner:
 
         return message_text
 
+    def _strip_leaked_shared_thread_prefix(
+        self,
+        text: Optional[str],
+        source: SessionSource,
+    ) -> str:
+        """Hide internal shared-thread speaker labels from user-visible replies."""
+        text = str(text or "")
+        if not text or not source or source.chat_type == "dm" or not source.thread_id:
+            return text
+        if getattr(self.config, "thread_sessions_per_user", False):
+            return text
+        speaker_name = str(getattr(source, "user_name", "") or "").strip()
+        if not speaker_name:
+            return text
+        prefix = f"[{speaker_name}] "
+        if text.startswith(prefix):
+            return text[len(prefix):].lstrip()
+        return text
+
     async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):
         """Inner handler that runs under the _running_agents sentinel guard."""
         _msg_start_time = time.time()
@@ -5207,6 +5226,8 @@ class GatewayRunner:
                     "results. This can happen with some models — try again or "
                     "rephrase your question."
                 )
+
+            response = self._strip_leaked_shared_thread_prefix(response, source)
             agent_messages = agent_result.get("messages", [])
             _response_time = time.time() - _msg_start_time
             _api_calls = agent_result.get("api_calls", 0)
@@ -11023,7 +11044,10 @@ class GatewayRunner:
                 _stream_consumer.finish()
             
             # Return final response, or a message if something went wrong
-            final_response = result.get("final_response")
+            final_response = self._strip_leaked_shared_thread_prefix(
+                result.get("final_response"),
+                source,
+            )
 
             # Extract actual token counts from the agent instance used for this run
             _last_prompt_toks = 0

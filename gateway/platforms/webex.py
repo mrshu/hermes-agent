@@ -55,6 +55,7 @@ from gateway.platforms.base import (
     safe_url_for_log,
 )
 from gateway.platforms.helpers import MessageDeduplicator
+from hermes_cli.commands import resolve_command
 
 logger = logging.getLogger(__name__)
 
@@ -568,11 +569,15 @@ class WebexAdapter(BasePlatformAdapter):
             sender_name = sender_display_name
 
         raw_text = str(message.get("text") or message.get("markdown") or "").strip()
-        if room_type != "direct" and self._require_mention and not self._group_message_mentions_bot(message):
-            return None
         text = raw_text
         if room_type != "direct":
             text = self._strip_bot_mention(text)
+            if (
+                self._require_mention
+                and not self._group_message_mentions_bot(message)
+                and not self._is_gateway_command(text)
+            ):
+                return None
 
         media_urls, media_types = await self._download_attachments(message.get("files") or [])
         msg_type = self._detect_message_type(text, media_types)
@@ -891,12 +896,20 @@ class WebexAdapter(BasePlatformAdapter):
             if not name:
                 continue
             candidate = re.sub(
-                rf"^\s*@?{re.escape(name)}[:,\-]\s*",
+                rf"^\s*@?{re.escape(name)}(?:\s*[:,\-]\s*|\s+|[).!?]\s*|$)",
                 "",
                 candidate,
                 flags=re.IGNORECASE,
             )
         return candidate.strip()
+
+    @staticmethod
+    def _is_gateway_command(text: str) -> bool:
+        text = str(text or "").strip()
+        if not text.startswith("/"):
+            return False
+        command = text.split(maxsplit=1)[0]
+        return resolve_command(command) is not None
 
     def _group_message_mentions_bot(self, message: Dict[str, Any]) -> bool:
         mentioned = message.get("mentionedPeople")
