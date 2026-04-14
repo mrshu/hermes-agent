@@ -8,7 +8,7 @@ description: "Receive events from GitHub, GitLab, and other services to trigger 
 
 Receive events from external services (GitHub, GitLab, JIRA, Stripe, etc.) and trigger Hermes agent runs automatically. The webhook adapter runs an HTTP server that accepts POST requests, validates HMAC signatures, transforms payloads into agent prompts, and routes responses back to the source or to another configured platform.
 
-The agent processes the event and can respond by posting comments on PRs, sending messages to Telegram/Discord, or logging the result.
+The agent processes the event and can respond by posting comments on PRs, sending messages to Telegram/Discord/Webex, or logging the result.
 
 ---
 
@@ -223,6 +223,7 @@ The `deliver` field controls where the agent's response goes after processing th
 | `telegram` | Routes the response to Telegram. Uses the home channel, or specify `chat_id` in `deliver_extra`. |
 | `discord` | Routes the response to Discord. Uses the home channel, or specify `chat_id` in `deliver_extra`. |
 | `slack` | Routes the response to Slack. Uses the home channel, or specify `chat_id` in `deliver_extra`. |
+| `webex` | Routes the response to Webex. Uses the home room, or specify `chat_id` in `deliver_extra`. Use `thread_id` to reply inside a Webex thread. |
 | `signal` | Routes the response to Signal. Uses the home channel, or specify `chat_id` in `deliver_extra`. |
 | `sms` | Routes the response to SMS via Twilio. Uses the home channel, or specify `chat_id` in `deliver_extra`. |
 | `whatsapp` | Routes the response to WhatsApp. Uses the home channel, or specify `chat_id` in `deliver_extra`. |

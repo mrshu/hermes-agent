@@ -8,7 +8,8 @@ GatewayStreamConsumer:
      a single message on the target platform
 
 Design: Uses the edit transport (send initial message, then editMessageText).
-This is universally supported across Telegram, Discord, and Slack.
+This is supported on adapters that implement message editing, including
+Telegram, Discord, Slack, and Webex.
 
 Credit: jobless0x (#774, #1312), OutThisLife (#798), clicksingh (#697).
 """

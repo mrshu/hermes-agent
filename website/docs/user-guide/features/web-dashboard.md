@@ -92,7 +92,7 @@ Manage the `.env` file where API keys and credentials are stored. Keys are group
 
 - **LLM Providers** — OpenRouter, Anthropic, OpenAI, DeepSeek, etc.
 - **Tool API Keys** — Browserbase, Firecrawl, Tavily, ElevenLabs, etc.
-- **Messaging Platforms** — Telegram, Discord, Slack bot tokens, etc.
+- **Messaging Platforms** — Telegram, Discord, Slack, Webex bot tokens, etc.
 - **Agent Settings** — non-secret env vars like `API_SERVER_ENABLED`
 
 Each key shows:
@@ -106,7 +106,7 @@ Advanced/rarely-used keys are hidden by default behind a toggle.
 
 ### Sessions
 
-Browse and inspect all agent sessions. Each row shows the session title, source platform icon (CLI, Telegram, Discord, Slack, cron), model name, message count, tool call count, and how long ago it was active. Live sessions are marked with a pulsing badge.
+Browse and inspect all agent sessions. Each row shows the session title, source platform icon (CLI, Telegram, Discord, Slack, Webex, cron), model name, message count, tool call count, and how long ago it was active. Live sessions are marked with a pulsing badge.
 
 - **Search** — full-text search across all message content using FTS5. Results show highlighted snippets and auto-scroll to the first matching message when expanded.
 - **Expand** — click a session to load its full message history. Messages are color-coded by role (user, assistant, system, tool) and rendered as Markdown with syntax highlighting.
@@ -137,7 +137,7 @@ Usage and cost analytics computed from session history. Select a time period (7,
 
 Create and manage scheduled cron jobs that run agent prompts on a recurring schedule.
 
-- **Create** — fill in a name (optional), prompt, cron expression (e.g. `0 9 * * *`), and delivery target (local, Telegram, Discord, Slack, or email)
+- **Create** — fill in a name (optional), prompt, cron expression (e.g. `0 9 * * *`), and delivery target (local, Telegram, Discord, Slack, Webex, or email)
 - **Job list** — each job shows its name, prompt preview, schedule expression, state badge (enabled/paused/error), delivery target, last run time, and next run time
 - **Pause / Resume** — toggle a job between active and paused states
 - **Trigger now** — immediately execute a job outside its normal schedule

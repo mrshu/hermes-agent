@@ -7,6 +7,7 @@ human-friendly channel names to IDs. Works in both CLI and gateway contexts.
 
 import json
 import logging
+import mimetypes
 import os
 import re
 import ssl
@@ -19,6 +20,7 @@ logger = logging.getLogger(__name__)
 _TELEGRAM_TOPIC_TARGET_RE = re.compile(r"^\s*(-?\d+)(?::(\d+))?\s*$")
 _FEISHU_TARGET_RE = re.compile(r"^\s*((?:oc|ou|on|chat|open)_[-A-Za-z0-9]+)(?::([-A-Za-z0-9_]+))?\s*$")
 _WEIXIN_TARGET_RE = re.compile(r"^\s*((?:wxid|gh|v\d+|wm|wb)_[A-Za-z0-9_-]+|[A-Za-z0-9._-]+@chatroom|filehelper)\s*$")
+_WEBEX_TARGET_RE = re.compile(r"^\s*([A-Za-z0-9_=+/\-]{24,}|[^@\s]+@[^@\s]+\.[^@\s]+)(?::([A-Za-z0-9_=+/\-]{24,}))?\s*$")
 # Discord snowflake IDs are numeric, same regex pattern as Telegram topic targets.
 _NUMERIC_TOPIC_RE = _TELEGRAM_TOPIC_TARGET_RE
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
@@ -68,7 +70,7 @@ SEND_MESSAGE_SCHEMA = {
             },
             "target": {
                 "type": "string",
-                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or 'platform:chat_id:thread_id' for Telegram topics and Discord threads. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'signal:+155****4567'"
+                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or 'platform:chat_id:thread_id' for Telegram topics, Discord threads, and Webex thread replies. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'webex:Y2lzY29zcGFyazovL3VzL1JPT00v...', 'signal:+155****4567'"
             },
             "message": {
                 "type": "string",
@@ -149,6 +151,7 @@ def _handle_send(args):
         "telegram": Platform.TELEGRAM,
         "discord": Platform.DISCORD,
         "slack": Platform.SLACK,
+        "webex": Platform.WEBEX,
         "whatsapp": Platform.WHATSAPP,
         "signal": Platform.SIGNAL,
         "bluebubbles": Platform.BLUEBUBBLES,
@@ -216,7 +219,9 @@ def _handle_send(args):
                 from gateway.mirror import mirror_to_session
                 from gateway.session_context import get_session_env
                 source_label = get_session_env("HERMES_SESSION_PLATFORM", "cli")
-                if mirror_to_session(platform_name, chat_id, mirror_text, source_label=source_label, thread_id=thread_id):
+                mirror_chat_id = result.get("resolved_chat_id", chat_id)
+                mirror_thread_id = result.get("resolved_thread_id", thread_id)
+                if mirror_to_session(platform_name, mirror_chat_id, mirror_text, source_label=source_label, thread_id=mirror_thread_id):
                     result["mirrored"] = True
             except Exception:
                 pass
@@ -246,6 +251,10 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         match = _WEIXIN_TARGET_RE.fullmatch(target_ref)
         if match:
             return match.group(1), None, True
+    if platform_name == "webex":
+        match = _WEBEX_TARGET_RE.fullmatch(target_ref)
+        if match:
+            return match.group(1), match.group(2), True
     if target_ref.lstrip("-").isdigit():
         return target_ref, None, True
     return None, None, False
@@ -384,6 +393,16 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     if platform == Platform.WEIXIN:
         return await _send_weixin(pconfig, chat_id, message, media_files=media_files)
 
+    # --- Webex: send text first, then upload local attachments natively ---
+    if platform == Platform.WEBEX:
+        return await _send_webex(
+            pconfig.token,
+            chat_id,
+            message,
+            thread_id=thread_id,
+            media_files=media_files,
+        )
+
     # --- Non-Telegram platforms ---
     if media_files and not message.strip():
         return {
@@ -405,6 +424,8 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             result = await _send_discord(pconfig.token, chat_id, chunk, thread_id=thread_id)
         elif platform == Platform.SLACK:
             result = await _send_slack(pconfig.token, chat_id, chunk)
+        elif platform == Platform.WEBEX:
+            result = await _send_webex(pconfig.token, chat_id, chunk, thread_id=thread_id)
         elif platform == Platform.WHATSAPP:
             result = await _send_whatsapp(pconfig.extra, chat_id, chunk)
         elif platform == Platform.SIGNAL:
@@ -622,6 +643,81 @@ async def _send_slack(token, chat_id, message):
                 return _error(f"Slack API error: {data.get('error', 'unknown')}")
     except Exception as e:
         return _error(f"Slack send failed: {e}")
+
+
+async def _send_webex(token, chat_id, message, thread_id=None, media_files=None):
+    """Send via the Webex Messages API."""
+    try:
+        import aiohttp
+    except ImportError:
+        return {"error": "aiohttp not installed. Run: pip install aiohttp"}
+
+    try:
+        token = token or os.getenv("WEBEX_BOT_TOKEN", "")
+        if not token:
+            return {"error": "Webex not configured (WEBEX_BOT_TOKEN required)"}
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+        }
+        media_files = media_files or []
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+            last_data = None
+
+            if message.strip():
+                payload = {"markdown": message}
+                if "@" in chat_id and " " not in chat_id:
+                    payload["toPersonEmail"] = chat_id
+                else:
+                    payload["roomId"] = chat_id
+                if thread_id:
+                    payload["parentId"] = thread_id
+
+                json_headers = {**headers, "Content-Type": "application/json"}
+                async with session.post("https://webexapis.com/v1/messages", headers=json_headers, json=payload) as resp:
+                    body = await resp.text()
+                    if resp.status not in (200, 201):
+                        return _error(f"Webex API error ({resp.status}): {body}")
+                    last_data = json.loads(body) if body else {}
+
+            for media_path, _is_voice in media_files:
+                if not os.path.exists(media_path):
+                    return _error(f"Media file not found: {media_path}")
+
+                form = aiohttp.FormData()
+                if "@" in chat_id and " " not in chat_id:
+                    form.add_field("toPersonEmail", chat_id)
+                else:
+                    form.add_field("roomId", chat_id)
+                if thread_id:
+                    form.add_field("parentId", thread_id)
+                filename = os.path.basename(media_path)
+                content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+                with open(media_path, "rb") as handle:
+                    form.add_field(
+                        "files",
+                        handle.read(),
+                        filename=filename,
+                        content_type=content_type,
+                    )
+                async with session.post("https://webexapis.com/v1/messages", headers=headers, data=form) as resp:
+                    body = await resp.text()
+                    if resp.status not in (200, 201):
+                        return _error(f"Webex media upload failed ({resp.status}): {body}")
+                    last_data = json.loads(body) if body else {}
+
+        if last_data is None:
+            return _error("No deliverable text or media remained after processing MEDIA tags")
+        return {
+            "success": True,
+            "platform": "webex",
+            "chat_id": chat_id,
+            "message_id": last_data.get("id"),
+            "resolved_chat_id": last_data.get("roomId", chat_id),
+            "resolved_thread_id": last_data.get("parentId", thread_id),
+        }
+    except Exception as e:
+        return _error(f"Webex send failed: {e}")
 
 
 async def _send_whatsapp(extra, chat_id, message):

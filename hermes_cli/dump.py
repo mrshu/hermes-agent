@@ -119,6 +119,7 @@ def _configured_platforms() -> list[str]:
         "telegram": "TELEGRAM_BOT_TOKEN",
         "discord": "DISCORD_BOT_TOKEN",
         "slack": "SLACK_BOT_TOKEN",
+        "webex": "WEBEX_BOT_TOKEN",
         "whatsapp": "WHATSAPP_ENABLED",
         "signal": "SIGNAL_HTTP_URL",
         "email": "EMAIL_ADDRESS",

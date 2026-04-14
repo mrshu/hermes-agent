@@ -117,7 +117,7 @@ def _detect_openclaw_processes() -> list[str]:
 def _warn_if_openclaw_running(auto_yes: bool) -> None:
     """Warn if OpenClaw is still running before migration.
 
-    Telegram, Discord, and Slack only allow one active connection per bot
+    Telegram, Discord, Slack, and Webex only allow one active connection per bot
     token. Migrating while OpenClaw is running causes both to fight for the
     same token.
     """
@@ -130,7 +130,7 @@ def _warn_if_openclaw_running(auto_yes: bool) -> None:
     for detail in running:
         print_info(f"  * {detail}")
     print_info(
-        "Messaging platforms (Telegram, Discord, Slack) only allow one "
+        "Messaging platforms (Telegram, Discord, Slack, Webex) only allow one "
         "active session per bot token. If you continue, both OpenClaw and "
         "Hermes may try to use the same token, causing disconnects."
     )
@@ -172,7 +172,7 @@ def _warn_if_gateway_running(auto_yes: bool) -> None:
     )
     print_info(
         "Migrating bot tokens while the gateway is active will cause "
-        "conflicts (Telegram, Discord, and Slack only allow one active "
+        "conflicts (Telegram, Discord, Slack, and Webex only allow one active "
         "session per token)."
     )
     print_info("Recommendation: stop the gateway first with 'hermes stop'.")

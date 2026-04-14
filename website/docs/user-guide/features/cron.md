@@ -192,6 +192,7 @@ When scheduling jobs, you specify where the output goes:
 | `"discord"` | Discord home channel | Uses `DISCORD_HOME_CHANNEL` |
 | `"discord:#engineering"` | Specific Discord channel | By channel name |
 | `"slack"` | Slack home channel | |
+| `"webex"` | Webex home room | |
 | `"whatsapp"` | WhatsApp home | |
 | `"signal"` | Signal | |
 | `"matrix"` | Matrix home room | |

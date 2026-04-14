@@ -136,7 +136,7 @@ fallback_model:
 | Context | Fallback Supported |
 |---------|-------------------|
 | CLI sessions | ✔ |
-| Messaging gateway (Telegram, Discord, etc.) | ✔ |
+| Messaging gateway (Telegram, Discord, Webex, etc.) | ✔ |
 | Subagent delegation | ✘ (subagents do not inherit fallback config) |
 | Cron jobs | ✘ (run with a fixed provider) |
 | Auxiliary tasks (vision, compression) | ✘ (use their own provider chain — see below) |

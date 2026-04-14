@@ -168,6 +168,7 @@ Cron job results can be delivered to any supported platform:
 | Telegram | `telegram` or `telegram:<chat_id>` | `telegram:-1001234567890` |
 | Discord | `discord` or `discord:#channel` | `discord:#engineering` |
 | Slack | `slack` | Deliver to Slack home channel |
+| Webex | `webex` | Deliver to Webex home room |
 | WhatsApp | `whatsapp` | Deliver to WhatsApp home |
 | Signal | `signal` | Deliver to Signal |
 | Matrix | `matrix` | Deliver to Matrix home room |

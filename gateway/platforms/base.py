@@ -1479,6 +1479,29 @@ class BasePlatformAdapter(ABC):
             return f"{existing_text}\n\n{new_text}".strip()
         return existing_text
 
+    def _strip_leaked_shared_thread_prefix(self, text: str, event: MessageEvent) -> str:
+        """Hide internal shared-thread speaker labels from user-visible replies.
+
+        The gateway may prepend ``[User Name]`` to inbound shared-thread text as
+        model-only context.  If the model echoes that label back verbatim, strip
+        the exact leading prefix before platform delivery.  This stays narrow on
+        purpose so legitimate bracketed content is preserved.
+        """
+        if not text:
+            return text
+        source = getattr(event, "source", None)
+        if not source or source.chat_type == "dm" or not source.thread_id:
+            return text
+        if self.config.extra.get("thread_sessions_per_user", False):
+            return text
+        speaker_name = str(getattr(source, "user_name", "") or "").strip()
+        if not speaker_name:
+            return text
+        prefix = f"[{speaker_name}] "
+        if text.startswith(prefix):
+            return text[len(prefix):].lstrip()
+        return text
+
     async def handle_message(self, event: MessageEvent) -> None:
         """
         Process an incoming message.
@@ -1627,6 +1650,7 @@ class BasePlatformAdapter(ABC):
             if not response:
                 logger.debug("[%s] Handler returned empty/None response for %s", self.name, event.source.chat_id)
             if response:
+                response = self._strip_leaked_shared_thread_prefix(response, event)
                 # Extract MEDIA:<path> tags (from TTS tool) before other processing
                 media_files, response = self.extract_media(response)
                 

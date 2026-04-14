@@ -41,6 +41,9 @@ _EXTRA_ENV_KEYS = frozenset({
     "WECOM_CALLBACK_CORP_ID", "WECOM_CALLBACK_CORP_SECRET", "WECOM_CALLBACK_AGENT_ID",
     "WECOM_CALLBACK_TOKEN", "WECOM_CALLBACK_ENCODING_AES_KEY",
     "WECOM_CALLBACK_HOST", "WECOM_CALLBACK_PORT",
+    "WEBEX_HOME_CHANNEL", "WEBEX_HOME_CHANNEL_NAME",
+    "WEBEX_CONNECTION_MODE", "WEBEX_WEBHOOK_PUBLIC_URL", "WEBEX_WEBHOOK_HOST", "WEBEX_WEBHOOK_PORT",
+    "WEBEX_WEBHOOK_PATH", "WEBEX_WEBHOOK_SECRET",
     "WEIXIN_ACCOUNT_ID", "WEIXIN_TOKEN", "WEIXIN_BASE_URL", "WEIXIN_CDN_BASE_URL",
     "WEIXIN_HOME_CHANNEL", "WEIXIN_HOME_CHANNEL_NAME", "WEIXIN_DM_POLICY", "WEIXIN_GROUP_POLICY",
     "WEIXIN_ALLOWED_USERS", "WEIXIN_GROUP_ALLOWED_USERS", "WEIXIN_ALLOW_ALL_USERS",
@@ -1207,6 +1210,45 @@ OPTIONAL_ENV_VARS = {
                        "message.channels, message.groups, app_mention",
         "prompt": "Slack App Token (xapp-...)",
         "url": "https://api.slack.com/apps",
+        "password": True,
+        "category": "messaging",
+    },
+    "WEBEX_BOT_TOKEN": {
+        "description": "Webex bot token for Messaging API access. Create a bot in the Webex developer portal "
+                       "and use its access token for sending messages, reading bot identity, and listening via "
+                       "the Webex SDK websocket bridge.",
+        "prompt": "Webex bot token",
+        "url": "https://developer.webex.com/my-apps/new/bot",
+        "password": True,
+        "category": "messaging",
+    },
+    "WEBEX_ALLOWED_USERS": {
+        "description": "Comma-separated Webex user IDs or emails allowed to use the bot",
+        "prompt": "Allowed Webex users (comma-separated)",
+        "url": None,
+        "password": False,
+        "category": "messaging",
+    },
+    "WEBEX_CONNECTION_MODE": {
+        "description": "Webex inbound transport mode: websocket (recommended, no public URL) or webhook "
+                       "(requires a public HTTPS callback URL)",
+        "prompt": "Webex connection mode",
+        "url": None,
+        "password": False,
+        "category": "messaging",
+    },
+    "WEBEX_WEBHOOK_PUBLIC_URL": {
+        "description": "Public HTTPS base URL that Webex should POST webhooks to in webhook mode, "
+                       "e.g. https://bot.example.com",
+        "prompt": "Webex public webhook URL",
+        "url": None,
+        "password": False,
+        "category": "messaging",
+    },
+    "WEBEX_WEBHOOK_SECRET": {
+        "description": "Secret used to sign incoming Webex webhooks (recommended)",
+        "prompt": "Webex webhook secret",
+        "url": None,
         "password": True,
         "category": "messaging",
     },

@@ -61,7 +61,7 @@ Or in-session:
 | `homeassistant` | `ha_call_service`, `ha_get_state`, `ha_list_entities`, `ha_list_services` | Smart home control via Home Assistant. Only available when `HASS_TOKEN` is set. |
 | `image_gen` | `image_generate` | Text-to-image generation via FAL.ai. |
 | `memory` | `memory` | Persistent cross-session memory management. |
-| `messaging` | `send_message` | Send messages to other platforms (Telegram, Discord, etc.) from within a session. |
+| `messaging` | `send_message` | Send messages to other platforms (Telegram, Discord, Webex, etc.) from within a session. |
 | `moa` | `mixture_of_agents` | Multi-model consensus via Mixture of Agents. |
 | `rl` | `rl_check_status`, `rl_edit_config`, `rl_get_current_config`, `rl_get_results`, `rl_list_environments`, `rl_list_runs`, `rl_select_environment`, `rl_start_training`, `rl_stop_training`, `rl_test_inference` | RL training environment management (Atropos). |
 | `search` | `web_search` | Web search only (without extract). |

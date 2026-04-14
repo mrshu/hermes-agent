@@ -126,7 +126,7 @@ Commands are case-insensitive — `/HELP` works the same as `/help`. Installed s
 
 ## Quick Commands
 
-You can define custom commands that run shell commands instantly without invoking the LLM. These work in both the CLI and messaging platforms (Telegram, Discord, etc.).
+You can define custom commands that run shell commands instantly without invoking the LLM. These work in both the CLI and messaging platforms (Telegram, Discord, Webex, etc.).
 
 ```yaml
 # ~/.hermes/config.yaml

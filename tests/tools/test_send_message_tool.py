@@ -271,6 +271,64 @@ class TestSendMessageTool:
             media_files=[],
         )
 
+    def test_parse_webex_room_and_thread_target(self):
+        room_id = "Y2lzY29zcGFyazovL3VzL1JPT00vYWJjMTIz"
+        parent_id = "Y2lzY29zcGFyazovL3VzL01FU1NBR0Uva2xv"
+
+        assert _parse_target_ref("webex", room_id) == (room_id, None, True)
+        assert _parse_target_ref("webex", f"{room_id}:{parent_id}") == (
+            room_id,
+            parent_id,
+            True,
+        )
+
+    def test_send_to_webex_uses_resolved_chat_id_for_mirroring(self):
+        webex_cfg = SimpleNamespace(enabled=True, token="webex-token", extra={})
+        config = SimpleNamespace(
+            platforms={Platform.WEBEX: webex_cfg},
+            get_home_channel=lambda _platform: None,
+        )
+
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch(
+                 "tools.send_message_tool._send_to_platform",
+                 new=AsyncMock(
+                     return_value={
+                         "success": True,
+                         "resolved_chat_id": "Y2lzY29zcGFyazovL3VzL1JPT00vcm9vbQ",
+                     }
+                 ),
+             ) as send_mock, \
+             patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock:
+            result = json.loads(
+                send_message_tool(
+                    {
+                        "action": "send",
+                        "target": "webex:alice@example.com",
+                        "message": "hello",
+                    }
+                )
+            )
+
+        assert result["success"] is True
+        send_mock.assert_awaited_once_with(
+            Platform.WEBEX,
+            webex_cfg,
+            "alice@example.com",
+            "hello",
+            thread_id=None,
+            media_files=[],
+        )
+        mirror_mock.assert_called_once_with(
+            "webex",
+            "Y2lzY29zcGFyazovL3VzL1JPT00vcm9vbQ",
+            "hello",
+            source_label="cli",
+            thread_id=None,
+        )
+
     def test_media_only_message_uses_placeholder_for_mirroring(self):
         config, telegram_cfg = _make_config()
 

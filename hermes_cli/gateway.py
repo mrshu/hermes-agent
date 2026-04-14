@@ -1655,6 +1655,37 @@ _PLATFORMS = [
         ],
     },
     {
+        "key": "webex",
+        "label": "Webex",
+        "emoji": "💬",
+        "token_var": "WEBEX_BOT_TOKEN",
+        "setup_instructions": [
+            "1. Go to https://developer.webex.com/my-apps/new/bot and create a Webex bot",
+            "2. Copy the bot access token from the Webex developer portal",
+            "3. Run `npm install` in the repo root once so the Webex JS SDK listener is available",
+            "4. WebSocket mode is recommended and does not require a public URL",
+            "5. Invite the bot to the Webex spaces where you want Hermes to respond",
+            "6. In group spaces, free-form chat requires an @mention; Hermes slash commands still work directly",
+            "7. Webhook mode is optional if you specifically want callback delivery and have a public HTTPS URL",
+            "8. To set a home room later, copy a room ID from an existing conversation or send a message first",
+        ],
+        "vars": [
+            {"name": "WEBEX_BOT_TOKEN", "prompt": "Bot token", "password": True,
+             "help": "Paste the bot access token from the Webex developer portal."},
+            {"name": "WEBEX_ALLOWED_USERS", "prompt": "Allowed user IDs or emails (comma-separated)", "password": False,
+             "is_allowlist": True,
+             "help": "Restrict who can use Hermes over Webex. Leave empty to rely on pairing or allow-all."},
+            {"name": "WEBEX_CONNECTION_MODE", "prompt": "Connection mode (websocket or webhook)", "password": False,
+             "help": "Use websocket for local-only inbound delivery without a public URL. Webhook mode is optional."},
+            {"name": "WEBEX_WEBHOOK_PUBLIC_URL", "prompt": "Public HTTPS base URL", "password": False,
+             "help": "Only needed in webhook mode. Public base URL that Webex can POST webhooks to."},
+            {"name": "WEBEX_WEBHOOK_SECRET", "prompt": "Webhook secret (recommended)", "password": True,
+             "help": "Only needed in webhook mode. Secret used to sign incoming Webex webhooks."},
+            {"name": "WEBEX_HOME_CHANNEL", "prompt": "Home room ID (for cron/notification delivery, or empty to set later)", "password": False,
+             "help": "Room ID where Hermes delivers cron results and notifications."},
+        ],
+    },
+    {
         "key": "matrix",
         "label": "Matrix",
         "emoji": "🔐",
@@ -2028,7 +2059,7 @@ def _runtime_health_lines() -> list[str]:
 
 
 def _setup_standard_platform(platform: dict):
-    """Interactive setup for Telegram, Discord, or Slack."""
+    """Interactive setup for Telegram, Discord, Slack, or Webex."""
     emoji = platform["emoji"]
     label = platform["label"]
     token_var = platform["token_var"]

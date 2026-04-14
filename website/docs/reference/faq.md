@@ -94,7 +94,7 @@ Hermes Agent itself is **free and open-source** (MIT license). You pay only for 
 
 ### Can multiple people use one instance?
 
-Yes. The [messaging gateway](../user-guide/messaging/index.md) lets multiple users interact with the same Hermes Agent instance via Telegram, Discord, Slack, WhatsApp, or Home Assistant. Access is controlled through allowlists (specific user IDs) and DM pairing (first user to message claims access).
+Yes. The [messaging gateway](../user-guide/messaging/index.md) lets multiple users interact with the same Hermes Agent instance via Telegram, Discord, Slack, Webex, WhatsApp, or Home Assistant. Access is controlled through allowlists (specific user IDs) and DM pairing (first user to message claims access).
 
 ### What's the difference between memory and skills?
 
@@ -343,7 +343,7 @@ cat ~/.hermes/logs/gateway.log | tail -50
 **Solution:**
 - Verify your bot token is valid with `hermes gateway setup`
 - Check gateway logs: `cat ~/.hermes/logs/gateway.log | tail -50`
-- For webhook-based platforms (Slack, WhatsApp), ensure your server is publicly accessible
+- For webhook-based platforms (Slack, WhatsApp, or Webex in webhook mode), ensure your server is publicly accessible
 
 #### Allowlist confusion — who can talk to the bot?
 
@@ -551,7 +551,7 @@ Profiles are a managed layer on top of `HERMES_HOME`. You *could* manually set `
 
 ### Can two profiles share the same bot token?
 
-No. Each messaging platform (Telegram, Discord, etc.) requires exclusive access to a bot token. If two profiles try to use the same token simultaneously, the second gateway will fail to connect. Create a separate bot per profile — for Telegram, talk to [@BotFather](https://t.me/BotFather) to make additional bots.
+No. Each messaging platform credential (Telegram, Discord, Slack, Webex, etc.) requires exclusive access. If two profiles try to use the same bot token simultaneously, the second gateway will fail to connect. Create a separate bot per profile — for Telegram, talk to [@BotFather](https://t.me/BotFather) to make additional bots.
 
 ### Do profiles share memory or sessions?
 

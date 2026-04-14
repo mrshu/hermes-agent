@@ -94,7 +94,7 @@ If you want voice bubbles without installing ffmpeg, switch to the OpenAI, Eleve
 
 ## Voice Message Transcription (STT)
 
-Voice messages sent on Telegram, Discord, WhatsApp, Slack, or Signal are automatically transcribed and injected as text into the conversation. The agent sees the transcript as normal text.
+Voice messages sent on Telegram, Discord, Slack, Webex, WhatsApp, or Signal are automatically transcribed and injected as text into the conversation. The agent sees the transcript as normal text.
 
 | Provider | Quality | Cost | API Key |
 |----------|---------|------|---------| 
