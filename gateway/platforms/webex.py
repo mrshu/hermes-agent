@@ -77,7 +77,7 @@ def check_webex_requirements() -> bool:
 class WebexAdapter(BasePlatformAdapter):
     """Gateway adapter for Webex Messaging bots."""
 
-    SUPPORTS_MESSAGE_EDITING = False
+    SUPPORTS_MESSAGE_EDITING = True
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.WEBEX)
@@ -240,6 +240,33 @@ class WebexAdapter(BasePlatformAdapter):
         data = await self._api_post_json("messages", payload)
         if not data:
             return SendResult(success=False, error="Webex send returned no data")
+        if data.get("id"):
+            return SendResult(success=True, message_id=str(data["id"]), raw_response=data)
+        return SendResult(success=False, error=json.dumps(data))
+
+    async def edit_message(
+        self,
+        chat_id: str,
+        message_id: str,
+        content: str,
+    ) -> SendResult:
+        message = self.format_message(content).strip()
+        if not message:
+            return SendResult(success=True, message_id=message_id)
+
+        room_id = await self._resolve_edit_room_id(chat_id, message_id)
+        if not room_id:
+            return SendResult(success=False, error="Missing room target for Webex edit")
+
+        data = await self._api_put_json(
+            f"messages/{message_id}",
+            {
+                "roomId": room_id,
+                "markdown": message,
+            },
+        )
+        if not data:
+            return SendResult(success=False, error="Webex edit returned no data")
         if data.get("id"):
             return SendResult(success=True, message_id=str(data["id"]), raw_response=data)
         return SendResult(success=False, error=json.dumps(data))
@@ -686,6 +713,21 @@ class WebexAdapter(BasePlatformAdapter):
             logger.warning("[Webex] POST %s failed: %s", path, exc)
             return {}
 
+    async def _api_put_json(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not self._session:
+            return {}
+        url = f"{API_BASE}/{path.lstrip('/')}"
+        try:
+            async with self._session.put(url, headers=self._json_headers(), json=payload) as resp:
+                text = await resp.text()
+                if resp.status >= 400:
+                    logger.warning("[Webex] PUT %s -> %s: %s", path, resp.status, text[:300])
+                    return {}
+                return json.loads(text) if text else {}
+        except Exception as exc:
+            logger.warning("[Webex] PUT %s failed: %s", path, exc)
+            return {}
+
     async def _api_delete(self, path: str) -> bool:
         if not self._session:
             return False
@@ -886,6 +928,17 @@ class WebexAdapter(BasePlatformAdapter):
         parent_id = metadata.get("thread_id")
         if parent_id:
             return str(parent_id)
+        return None
+
+    async def _resolve_edit_room_id(self, chat_id: str, message_id: str) -> Optional[str]:
+        target = str(chat_id or "").strip()
+        if target and "@" not in target:
+            return target
+
+        message = await self._api_get_json(f"messages/{message_id}")
+        room_id = str((message or {}).get("roomId") or "").strip()
+        if room_id:
+            return room_id
         return None
 
     def _strip_bot_mention(self, text: str) -> str:

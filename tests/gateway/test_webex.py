@@ -89,9 +89,66 @@ class TestWebexSignatures:
 
 
 class TestWebexStreamingSupport:
-    def test_supports_message_editing_is_false(self):
+    def test_supports_message_editing_is_true(self):
         adapter = _make_adapter()
-        assert adapter.SUPPORTS_MESSAGE_EDITING is False
+        assert adapter.SUPPORTS_MESSAGE_EDITING is True
+
+    @pytest.mark.asyncio
+    async def test_edit_message_uses_room_target(self):
+        adapter = _make_adapter()
+        adapter._api_put_json = AsyncMock(
+            return_value={
+                "id": "msg-1",
+                "roomId": "Y2lzY29zcGFyazovL3VzL1JPT00vroom",
+                "markdown": "Updated text",
+            }
+        )
+
+        result = await adapter.edit_message(
+            chat_id="Y2lzY29zcGFyazovL3VzL1JPT00vroom",
+            message_id="msg-1",
+            content="Updated text",
+        )
+
+        assert result.success is True
+        assert result.message_id == "msg-1"
+        adapter._api_put_json.assert_awaited_once_with(
+            "messages/msg-1",
+            {
+                "roomId": "Y2lzY29zcGFyazovL3VzL1JPT00vroom",
+                "markdown": "Updated text",
+            },
+        )
+
+    @pytest.mark.asyncio
+    async def test_edit_message_resolves_room_for_direct_target(self):
+        adapter = _make_adapter()
+        adapter._api_get_json = AsyncMock(
+            return_value={"id": "msg-2", "roomId": "Y2lzY29zcGFyazovL3VzL1JPT00vdm-room"}
+        )
+        adapter._api_put_json = AsyncMock(
+            return_value={
+                "id": "msg-2",
+                "roomId": "Y2lzY29zcGFyazovL3VzL1JPT00vdm-room",
+                "markdown": "Edited DM text",
+            }
+        )
+
+        result = await adapter.edit_message(
+            chat_id="user@example.com",
+            message_id="msg-2",
+            content="Edited DM text",
+        )
+
+        assert result.success is True
+        adapter._api_get_json.assert_awaited_once_with("messages/msg-2")
+        adapter._api_put_json.assert_awaited_once_with(
+            "messages/msg-2",
+            {
+                "roomId": "Y2lzY29zcGFyazovL3VzL1JPT00vdm-room",
+                "markdown": "Edited DM text",
+            },
+        )
 
 
 class TestWebexEventBuilding:
