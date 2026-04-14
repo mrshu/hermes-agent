@@ -105,6 +105,7 @@ AUTHOR_MAP = {
     "adavyasharma@gmail.com": "adavyas",
     "acaayush1111@gmail.com": "aayushchaudhary",
     "jason@outland.art": "jasonoutland",
+    "mr@shu.io": "mrshu",
     "mrflu1918@proton.me": "SPANISHFLU",
     "morganemoss@gmai.com": "mormio",
     "kopjop926@gmail.com": "cesareth",
