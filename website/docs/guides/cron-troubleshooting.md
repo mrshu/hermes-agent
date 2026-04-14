@@ -62,6 +62,7 @@ Delivery targets are case-sensitive and require the correct platform to be confi
 | `telegram` | `TELEGRAM_BOT_TOKEN` in `~/.hermes/.env` |
 | `discord` | `DISCORD_BOT_TOKEN` in `~/.hermes/.env` |
 | `slack` | `SLACK_BOT_TOKEN` in `~/.hermes/.env` |
+| `webex` | `WEBEX_BOT_TOKEN` in `~/.hermes/.env` |
 | `whatsapp` | WhatsApp gateway configured |
 | `signal` | Signal gateway configured |
 | `matrix` | Matrix homeserver configured |
@@ -70,7 +71,7 @@ Delivery targets are case-sensitive and require the correct platform to be confi
 | `local` | Write access to `~/.hermes/cron/output/` |
 | `origin` | Delivers to the chat where the job was created |
 
-Other supported platforms include `mattermost`, `homeassistant`, `dingtalk`, `feishu`, `wecom`, `weixin`, `bluebubbles`, `qqbot`, and `webhook`. You can also target a specific chat with `platform:chat_id` syntax (e.g., `telegram:-1001234567890`).
+Other supported platforms include `mattermost`, `homeassistant`, `dingtalk`, `feishu`, `wecom`, `weixin`, `bluebubbles`, `qqbot`, and `webhook`. You can also target a specific chat with `platform:chat_id` syntax (e.g., `telegram:-1001234567890` or `webex:Y2lzY29zcGFyazovL3VzL1JPT00v...`).
 
 If delivery fails, the job still runs — it just won't send anywhere. Check `hermes cron list` for updated `last_error` field (if available).
 
@@ -87,6 +88,7 @@ Each messaging platform bot needs specific permissions to receive messages. If d
 - **Telegram**: Bot must be an admin in the target group/channel
 - **Discord**: Bot must have permission to send in the target channel
 - **Slack**: Bot must be added to the workspace and have `chat:write` scope
+- **Webex**: Bot must be a member of the target space or room
 
 ### Check 4: Response wrapping
 

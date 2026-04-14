@@ -28,7 +28,7 @@ This drops you into the setup wizard, which will prompt you for your API keys an
 
 ## Running in gateway mode
 
-Once configured, run the container in the background as a persistent gateway (Telegram, Discord, Slack, WhatsApp, etc.):
+Once configured, run the container in the background as a persistent gateway (Telegram, Discord, Slack, Webex, WhatsApp, etc.):
 
 ```sh
 docker run -d \

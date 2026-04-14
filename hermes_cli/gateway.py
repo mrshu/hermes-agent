@@ -2883,7 +2883,7 @@ def _runtime_health_lines() -> list[str]:
 
 
 def _setup_standard_platform(platform: dict):
-    """Interactive setup for Telegram, Discord, or Slack."""
+    """Interactive setup for Telegram, Discord, Slack, or Webex."""
     emoji = platform["emoji"]
     label = platform["label"]
     token_var = platform["token_var"]

@@ -99,7 +99,7 @@ Binary files are detected via MIME type and null-byte scanning. Known text exten
 
 Context references are primarily a **CLI feature**. They work in the interactive CLI where `@` triggers tab completion and references are expanded before the message is sent to the agent.
 
-In **messaging platforms** (Telegram, Discord, etc.), the `@` syntax is not expanded by the gateway — messages are passed through as-is. The agent itself can still reference files via the `read_file`, `search_files`, and `web_extract` tools.
+In **messaging platforms** (Telegram, Discord, Webex, etc.), the `@` syntax is not expanded by the gateway — messages are passed through as-is. The agent itself can still reference files via the `read_file`, `search_files`, and `web_extract` tools.
 
 ## Interaction with Context Compression
 

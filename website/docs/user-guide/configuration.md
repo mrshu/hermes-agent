@@ -1097,7 +1097,7 @@ display:
 | `all` | Every tool call with a short preview (default) |
 | `verbose` | Full args, results, and debug logs |
 
-In the CLI, cycle through these modes with `/verbose`. To use `/verbose` in messaging platforms (Telegram, Discord, Slack, etc.), set `tool_progress_command: true` in the `display` section above. The command will then cycle the mode and save to config.
+In the CLI, cycle through these modes with `/verbose`. To use `/verbose` in messaging platforms (Telegram, Discord, Slack, Webex, etc.), set `tool_progress_command: true` in the `display` section above. The command will then cycle the mode and save to config.
 
 ### Per-platform progress overrides
 
@@ -1112,7 +1112,7 @@ display:
     slack: 'off'              # quiet in shared Slack workspace
 ```
 
-Platforms without an override fall back to the global `tool_progress` value. Valid platform keys: `telegram`, `discord`, `slack`, `signal`, `whatsapp`, `matrix`, `mattermost`, `email`, `sms`, `homeassistant`, `dingtalk`, `feishu`, `wecom`, `weixin`, `bluebubbles`, `qqbot`.
+Platforms without an override fall back to the global `tool_progress` value. Valid platform keys: `telegram`, `discord`, `slack`, `webex`, `signal`, `whatsapp`, `matrix`, `mattermost`, `email`, `sms`, `homeassistant`, `dingtalk`, `feishu`, `wecom`, `weixin`, `bluebubbles`, `qqbot`.
 
 `interim_assistant_messages` is gateway-only. When enabled, Hermes sends completed mid-turn assistant updates as separate chat messages. This is independent from `tool_progress` and does not require gateway streaming.
 
@@ -1194,7 +1194,7 @@ display:
 
 When enabled, responses appear token-by-token inside a streaming box. Tool calls are still captured silently. If the provider doesn't support streaming, it falls back to the normal display automatically.
 
-### Gateway Streaming (Telegram, Discord, Slack)
+### Gateway Streaming (edit-capable platforms like Telegram, Discord, and Slack)
 
 ```yaml
 streaming:
@@ -1206,7 +1206,7 @@ streaming:
   fresh_final_after_seconds: 60   # Send fresh final (Telegram) when preview is this old; 0 = always edit in place
 ```
 
-When enabled, the bot sends a message on the first token, then progressively edits it as more tokens arrive. Platforms that don't support message editing (Signal, Email, Home Assistant) are auto-detected on the first attempt — streaming is gracefully disabled for that session with no flood of messages.
+When enabled, the bot sends a message on the first token, then progressively edits it as more tokens arrive. Platforms that don't support message editing (Webex, Signal, Email, Home Assistant) are auto-detected on the first attempt — streaming is gracefully disabled for that session with no flood of messages.
 
 For separate natural mid-turn assistant updates without progressive token editing, set `display.interim_assistant_messages: true`.
 
@@ -1250,7 +1250,7 @@ whatsapp:
 
 ## Quick Commands
 
-Define custom commands that either run shell commands without invoking the LLM, or alias one slash command to another. Exec quick commands are zero-token and useful from messaging platforms (Telegram, Discord, etc.) for quick server checks or utility scripts.
+Define custom commands that either run shell commands without invoking the LLM, or alias one slash command to another. Exec quick commands are zero-token and useful from messaging platforms (Telegram, Discord, Webex, etc.) for quick server checks or utility scripts.
 
 ```yaml
 quick_commands:
@@ -1277,7 +1277,7 @@ Usage: type `/status`, `/disk`, `/update`, `/gpu`, or `/restart` in the CLI or a
 - **Priority** — quick commands are checked before skill commands, so you can override skill names
 - **Autocomplete** — quick commands are resolved at dispatch time and are not shown in the built-in slash-command autocomplete tables
 - **Type** — supported types are `exec` and `alias`; other types show an error
-- **Works everywhere** — CLI, Telegram, Discord, Slack, WhatsApp, Signal, Email, Home Assistant
+- **Works everywhere** — CLI, Telegram, Discord, Slack, Webex, WhatsApp, Signal, Email, Home Assistant
 
 String-only prompt shortcuts are not valid quick commands. For reusable prompt workflows, create a skill or alias to an existing slash command.
 

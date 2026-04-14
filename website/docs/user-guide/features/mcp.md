@@ -448,7 +448,7 @@ In addition to connecting **to** MCP servers, Hermes can also **be** an MCP serv
 
 ### When to use this
 
-- You want Claude Code, Cursor, or another coding agent to send and read Telegram/Discord/Slack messages through Hermes
+- You want Claude Code, Cursor, or another coding agent to send and read Telegram/Discord/Slack/Webex messages through Hermes
 - You want a single MCP server that bridges to all of Hermes's connected messaging platforms at once
 - You already have a running Hermes gateway with connected platforms
 
