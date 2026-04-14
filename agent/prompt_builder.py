@@ -334,6 +334,13 @@ PLATFORM_HINTS = {
         "attachments, audio as file attachments. You can also include image URLs "
         "in markdown format ![alt](url) and they will be uploaded as attachments."
     ),
+    "webex": (
+        "You are in a Webex space communicating with your user. "
+        "Webex supports plain text and markdown. In group spaces, bots typically "
+        "respond when they are directly mentioned; in direct spaces they can reply "
+        "normally. You can send media files natively: include MEDIA:/absolute/path/to/file "
+        "in your response. Images and documents are sent as native file attachments."
+    ),
     "signal": (
         "You are on a text messaging communication platform, Signal. "
         "Please do not use markdown as it does not render. "
