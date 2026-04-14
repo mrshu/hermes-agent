@@ -88,6 +88,12 @@ class TestWebexSignatures:
         assert adapter._verify_signature({"X-Webex-Signature": f"sha256={digest}"}, body) is True
 
 
+class TestWebexStreamingSupport:
+    def test_supports_message_editing_is_false(self):
+        adapter = _make_adapter()
+        assert adapter.SUPPORTS_MESSAGE_EDITING is False
+
+
 class TestWebexEventBuilding:
     @pytest.mark.asyncio
     async def test_build_event_shapes_group_mention(self):

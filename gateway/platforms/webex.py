@@ -77,6 +77,8 @@ def check_webex_requirements() -> bool:
 class WebexAdapter(BasePlatformAdapter):
     """Gateway adapter for Webex Messaging bots."""
 
+    SUPPORTS_MESSAGE_EDITING = False
+
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.WEBEX)
         extra = config.extra or {}

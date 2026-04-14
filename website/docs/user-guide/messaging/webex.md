@@ -20,6 +20,7 @@ events into a public HTTPS endpoint.
 | **Optional connection** | Webhook |
 | **Primary credential** | Webex bot token |
 | **User identification** | Email address or Webex person ID |
+| **Streaming edits** | Not currently supported |
 
 ## Step 1: Create a Webex Bot
 
