@@ -197,6 +197,54 @@ class TestWebexEventBuilding:
         assert event.source.user_id_alt == "person-1"
 
     @pytest.mark.asyncio
+    async def test_build_event_fetches_full_message_when_event_has_metadata_only(self):
+        adapter = _make_adapter()
+        room_id = "Y2lzY29zcGFyazovL3VzL1JPT00vroom"
+
+        async def _fake_api_get(path, params=None):
+            if path == "messages/msg-6":
+                return {
+                    "id": "msg-6",
+                    "roomId": room_id,
+                    "roomType": "group",
+                    "personId": "person-1",
+                    "personEmail": "user@example.com",
+                    "mentionedPeople": ["bot-person-id"],
+                    "text": "@Hermes: fetched text",
+                    "files": [],
+                }
+            if path == f"rooms/{room_id}":
+                return {
+                    "id": room_id,
+                    "title": "Incident Room",
+                    "type": "group",
+                }
+            if path == "people/person-1":
+                return {"displayName": "Alice"}
+            raise AssertionError(f"Unexpected path: {path} params={params!r}")
+
+        adapter._api_get_json = AsyncMock(side_effect=_fake_api_get)
+        adapter._download_attachments = AsyncMock(return_value=([], []))
+
+        event = await adapter._build_event(
+            {
+                "resource": "messages",
+                "event": "created",
+                "data": {
+                    "id": "msg-6",
+                    "roomId": room_id,
+                    "roomType": "group",
+                    "personId": "person-1",
+                    "personEmail": "user@example.com",
+                },
+            }
+        )
+
+        assert event is not None
+        assert event.text == "fetched text"
+        adapter._api_get_json.assert_any_await("messages/msg-6")
+
+    @pytest.mark.asyncio
     async def test_build_event_ignores_bot_messages(self):
         adapter = _make_adapter()
         adapter._api_get_json = AsyncMock(
@@ -325,6 +373,187 @@ class TestWebexEventBuilding:
         assert event is not None
         assert event.text == "/sethome"
         assert event.message_type.value == "command"
+
+
+class TestWebexThreadContext:
+    @pytest.mark.asyncio
+    async def test_build_event_prepends_thread_context_for_first_thread_turn(self):
+        adapter = _make_adapter()
+        room_id = "Y2lzY29zcGFyazovL3VzL1JPT00vroom"
+
+        async def _fake_api_get(path, params=None):
+            if path == f"rooms/{room_id}":
+                return {"id": room_id, "title": "Incident Room", "type": "group"}
+            if path == "messages/parent-1":
+                return {
+                    "id": "parent-1",
+                    "roomId": room_id,
+                    "personId": "person-0",
+                    "personEmail": "carol@example.com",
+                    "text": "Original incident summary",
+                }
+            if path == "messages":
+                assert params == {
+                    "roomId": room_id,
+                    "parentId": "parent-1",
+                    "max": 31,
+                }
+                return {
+                    "items": [
+                        {
+                            "id": "msg-current",
+                            "personId": "person-1",
+                            "personEmail": "alice@example.com",
+                            "text": "@Hermes can you summarize this?",
+                        },
+                        {
+                            "id": "msg-self",
+                            "personId": "bot-person-id",
+                            "personEmail": "hermes@example.com",
+                            "text": "Prior Hermes reply",
+                        },
+                        {
+                            "id": "msg-prior",
+                            "personId": "person-2",
+                            "personEmail": "bob@example.com",
+                            "text": "The database is noisy",
+                        },
+                    ]
+                }
+            raise AssertionError(f"Unexpected path: {path} params={params!r}")
+
+        async def _fake_lookup(person_id):
+            return {
+                "person-0": "Carol",
+                "person-1": "Alice",
+                "person-2": "Bob",
+            }.get(person_id, "")
+
+        adapter._api_get_json = AsyncMock(side_effect=_fake_api_get)
+        adapter._lookup_display_name = AsyncMock(side_effect=_fake_lookup)
+        adapter._download_attachments = AsyncMock(return_value=([], []))
+
+        event = await adapter._build_event(
+            {
+                "resource": "messages",
+                "event": "created",
+                "data": {
+                    "id": "msg-current",
+                    "roomId": room_id,
+                    "roomType": "group",
+                    "parentId": "parent-1",
+                    "personId": "person-1",
+                    "personEmail": "alice@example.com",
+                    "mentionedPeople": ["bot-person-id"],
+                    "text": "@Hermes can you summarize this?",
+                    "files": [],
+                },
+            }
+        )
+
+        assert event is not None
+        assert event.source.thread_id == "parent-1"
+        assert event.reply_to_message_id == "parent-1"
+        assert event.reply_to_text == "Original incident summary"
+        assert "[Webex thread context" in event.text
+        assert "[thread parent] Carol: Original incident summary" in event.text
+        assert "Bob: The database is noisy" in event.text
+        assert "Prior Hermes reply" not in event.text
+        assert event.text.endswith("can you summarize this?")
+
+    @pytest.mark.asyncio
+    async def test_build_event_skips_thread_context_when_session_exists(self):
+        adapter = _make_adapter()
+        room_id = "Y2lzY29zcGFyazovL3VzL1JPT00vroom"
+        adapter._has_active_session_for_thread = lambda **_: True
+
+        async def _fake_api_get(path, params=None):
+            if path == f"rooms/{room_id}":
+                return {"id": room_id, "title": "Incident Room", "type": "group"}
+            if path == "messages/parent-1":
+                return {
+                    "id": "parent-1",
+                    "roomId": room_id,
+                    "personId": "person-0",
+                    "personEmail": "carol@example.com",
+                    "text": "Original incident summary",
+                }
+            if path == "messages":
+                raise AssertionError("thread replies should not be fetched for active sessions")
+            raise AssertionError(f"Unexpected path: {path} params={params!r}")
+
+        adapter._api_get_json = AsyncMock(side_effect=_fake_api_get)
+        adapter._lookup_display_name = AsyncMock(return_value="Alice")
+        adapter._download_attachments = AsyncMock(return_value=([], []))
+
+        event = await adapter._build_event(
+            {
+                "resource": "messages",
+                "event": "created",
+                "data": {
+                    "id": "msg-current",
+                    "roomId": room_id,
+                    "roomType": "group",
+                    "parentId": "parent-1",
+                    "personId": "person-1",
+                    "personEmail": "alice@example.com",
+                    "mentionedPeople": ["bot-person-id"],
+                    "text": "@Hermes can you summarize this?",
+                    "files": [],
+                },
+            }
+        )
+
+        assert event is not None
+        assert event.text == "can you summarize this?"
+        assert event.reply_to_text == "Original incident summary"
+
+    @pytest.mark.asyncio
+    async def test_build_event_does_not_prepend_context_to_thread_command(self):
+        adapter = _make_adapter()
+        room_id = "Y2lzY29zcGFyazovL3VzL1JPT00vroom"
+
+        async def _fake_api_get(path, params=None):
+            if path == f"rooms/{room_id}":
+                return {"id": room_id, "title": "Incident Room", "type": "group"}
+            if path == "messages/parent-1":
+                return {
+                    "id": "parent-1",
+                    "roomId": room_id,
+                    "personId": "person-0",
+                    "personEmail": "carol@example.com",
+                    "text": "Original incident summary",
+                }
+            if path == "messages":
+                raise AssertionError("thread context should not be prepended to commands")
+            raise AssertionError(f"Unexpected path: {path} params={params!r}")
+
+        adapter._api_get_json = AsyncMock(side_effect=_fake_api_get)
+        adapter._lookup_display_name = AsyncMock(return_value="Alice")
+        adapter._download_attachments = AsyncMock(return_value=([], []))
+
+        event = await adapter._build_event(
+            {
+                "resource": "messages",
+                "event": "created",
+                "data": {
+                    "id": "msg-current",
+                    "roomId": room_id,
+                    "roomType": "group",
+                    "parentId": "parent-1",
+                    "personId": "person-1",
+                    "personEmail": "alice@example.com",
+                    "mentionedPeople": ["bot-person-id"],
+                    "text": "@Hermes /status",
+                    "files": [],
+                },
+            }
+        )
+
+        assert event is not None
+        assert event.text == "/status"
+        assert event.message_type.value == "command"
+        assert event.reply_to_text == "Original incident summary"
 
 
 class TestWebexSend:

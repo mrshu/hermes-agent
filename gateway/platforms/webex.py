@@ -28,6 +28,7 @@ import os
 import re
 import socket as _socket
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
@@ -67,6 +68,18 @@ DEFAULT_WEBHOOK_PREFIX = "hermes-webex"
 DEFAULT_CONNECTION_MODE = "websocket"
 LISTENER_READY_TIMEOUT_SECONDS = 30
 ROOM_CACHE_TTL_SECONDS = 300
+THREAD_CONTEXT_CACHE_TTL_SECONDS = 60.0
+THREAD_CONTEXT_DEFAULT_LIMIT = 30
+THREAD_CONTEXT_MAX_CHARS = 6000
+
+
+@dataclass
+class _WebexThreadContextCache:
+    """Cache entry for fetched Webex thread context."""
+
+    content: str
+    fetched_at: float = field(default_factory=time.monotonic)
+    parent_text: str = ""
 
 
 def check_webex_requirements() -> bool:
@@ -110,6 +123,7 @@ class WebexAdapter(BasePlatformAdapter):
         self._bot_email: str = ""
         self._bot_display_name: str = ""
         self._room_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+        self._thread_context_cache: Dict[str, _WebexThreadContextCache] = {}
         self._managed_webhook_ids: List[str] = []
 
     # ------------------------------------------------------------------
@@ -573,9 +587,11 @@ class WebexAdapter(BasePlatformAdapter):
             return None
 
         message = self._coerce_event_message(data)
-        if not message:
-            message = await self._api_get_json(f"messages/{message_id}")
-            if not message:
+        if not message or self._needs_full_message_fetch(message):
+            fetched_message = await self._api_get_json(f"messages/{message_id}")
+            if fetched_message:
+                message = {**message, **fetched_message}
+            elif not message:
                 return None
         if self._dedup.is_duplicate(message_id):
             return None
@@ -597,6 +613,7 @@ class WebexAdapter(BasePlatformAdapter):
         if sender_display_name:
             sender_name = sender_display_name
 
+        parent_id = str(message.get("parentId") or "") or None
         raw_text = str(message.get("text") or message.get("markdown") or "").strip()
         text = raw_text
         if room_type != "direct":
@@ -617,9 +634,27 @@ class WebexAdapter(BasePlatformAdapter):
             chat_type=chat_type,
             user_id=sender_email or sender_person_id,
             user_name=sender_name,
-            thread_id=str(message.get("parentId") or "") or None,
+            thread_id=parent_id,
             user_id_alt=sender_person_id or None,
         )
+
+        reply_to_text = None
+        if parent_id:
+            if msg_type != MessageType.COMMAND and not self._has_active_session_for_thread(
+                room_id=room_id,
+                chat_type=chat_type,
+                parent_id=parent_id,
+                user_id=sender_email or sender_person_id,
+                user_id_alt=sender_person_id or None,
+            ):
+                thread_context = await self._fetch_thread_context(
+                    room_id=room_id,
+                    parent_id=parent_id,
+                    current_message_id=message_id,
+                )
+                if thread_context:
+                    text = thread_context + text
+            reply_to_text = await self._fetch_thread_parent_text(room_id, parent_id) or None
 
         return MessageEvent(
             text=text,
@@ -629,6 +664,8 @@ class WebexAdapter(BasePlatformAdapter):
             message_id=message_id,
             media_urls=media_urls,
             media_types=media_types,
+            reply_to_message_id=parent_id,
+            reply_to_text=reply_to_text,
         )
 
     @staticmethod
@@ -638,6 +675,14 @@ class WebexAdapter(BasePlatformAdapter):
         if not data.get("id") or not data.get("roomId") or not data.get("personId"):
             return {}
         return dict(data)
+
+    @staticmethod
+    def _needs_full_message_fetch(message: Dict[str, Any]) -> bool:
+        return not bool(
+            message.get("text")
+            or message.get("markdown")
+            or message.get("files")
+        )
 
     # ------------------------------------------------------------------
     # Webex API helpers
@@ -668,12 +713,16 @@ class WebexAdapter(BasePlatformAdapter):
         person = await self._api_get_json(f"people/{person_id}")
         return str(person.get("displayName") or "")
 
-    async def _api_get_json(self, path: str) -> Dict[str, Any]:
+    async def _api_get_json(
+        self,
+        path: str,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         if not self._session:
             return {}
         url = f"{API_BASE}/{path.lstrip('/')}"
         try:
-            async with self._session.get(url, headers=self._headers()) as resp:
+            async with self._session.get(url, headers=self._headers(), params=params) as resp:
                 text = await resp.text()
                 if resp.status >= 400:
                     logger.warning("[Webex] GET %s -> %s: %s", path, resp.status, text[:300])
@@ -1010,6 +1059,160 @@ class WebexAdapter(BasePlatformAdapter):
         if any(mt.startswith("video/") for mt in media_types):
             return MessageType.VIDEO
         return MessageType.DOCUMENT
+
+    # ------------------------------------------------------------------
+    # Thread context helpers
+    # ------------------------------------------------------------------
+
+    def _has_active_session_for_thread(
+        self,
+        *,
+        room_id: str,
+        chat_type: str,
+        parent_id: str,
+        user_id: str,
+        user_id_alt: Optional[str] = None,
+    ) -> bool:
+        """Return True when Hermes already has a session for this Webex thread."""
+
+        session_store = getattr(self, "_session_store", None)
+        if not session_store:
+            return False
+
+        try:
+            from gateway.session import SessionSource, build_session_key
+
+            source = SessionSource(
+                platform=Platform.WEBEX,
+                chat_id=room_id,
+                chat_type=chat_type,
+                user_id=user_id,
+                thread_id=parent_id,
+                user_id_alt=user_id_alt,
+            )
+            store_cfg = getattr(session_store, "config", None)
+            group_sessions_per_user = (
+                getattr(store_cfg, "group_sessions_per_user", True)
+                if store_cfg else True
+            )
+            thread_sessions_per_user = (
+                getattr(store_cfg, "thread_sessions_per_user", False)
+                if store_cfg else False
+            )
+            session_key = build_session_key(
+                source,
+                group_sessions_per_user=group_sessions_per_user,
+                thread_sessions_per_user=thread_sessions_per_user,
+            )
+            session_store._ensure_loaded()
+            return session_key in session_store._entries
+        except Exception:
+            return False
+
+    async def _fetch_thread_context(
+        self,
+        *,
+        room_id: str,
+        parent_id: str,
+        current_message_id: str,
+        limit: int = THREAD_CONTEXT_DEFAULT_LIMIT,
+    ) -> str:
+        """Fetch prior Webex thread messages for first-contact thread context."""
+
+        cache_key = f"{room_id}:{parent_id}"
+        now = time.monotonic()
+        cached = self._thread_context_cache.get(cache_key)
+        if cached and (now - cached.fetched_at) < THREAD_CONTEXT_CACHE_TTL_SECONDS:
+            return cached.content
+
+        parent = await self._api_get_json(f"messages/{parent_id}")
+        if not parent:
+            return ""
+
+        replies_result = await self._api_get_json(
+            "messages",
+            params={
+                "roomId": room_id,
+                "parentId": parent_id,
+                "max": limit + 1,
+            },
+        )
+        replies = replies_result.get("items")
+        if not isinstance(replies, list):
+            replies = []
+
+        parts: List[str] = []
+        parent_text = self._message_text(parent)
+        parent_line = await self._format_thread_message(parent, is_parent=True)
+        if parent_line:
+            parts.append(parent_line)
+
+        for reply in reversed(replies):
+            if not isinstance(reply, dict):
+                continue
+            if str(reply.get("id") or "") == current_message_id:
+                continue
+            if str(reply.get("personId") or "") == self._bot_id:
+                continue
+            line = await self._format_thread_message(reply, is_parent=False)
+            if line:
+                parts.append(line)
+
+        content = ""
+        if parts:
+            content = (
+                "[Webex thread context - prior messages in this thread "
+                "(not yet in conversation history):]\n"
+                + "\n".join(parts)
+                + "\n[End of Webex thread context]\n\n"
+            )
+            if len(content) > THREAD_CONTEXT_MAX_CHARS:
+                content = content[: THREAD_CONTEXT_MAX_CHARS - 18].rstrip() + "\n... [truncated]\n\n"
+
+        self._thread_context_cache[cache_key] = _WebexThreadContextCache(
+            content=content,
+            fetched_at=now,
+            parent_text=parent_text,
+        )
+        return content
+
+    async def _fetch_thread_parent_text(self, room_id: str, parent_id: str) -> str:
+        """Return the raw text of a Webex thread parent for reply context."""
+
+        cache_key = f"{room_id}:{parent_id}"
+        now = time.monotonic()
+        cached = self._thread_context_cache.get(cache_key)
+        if cached and (now - cached.fetched_at) < THREAD_CONTEXT_CACHE_TTL_SECONDS:
+            return cached.parent_text
+
+        parent = await self._api_get_json(f"messages/{parent_id}")
+        if not parent:
+            return ""
+        return self._message_text(parent)
+
+    async def _format_thread_message(self, message: Dict[str, Any], *, is_parent: bool) -> str:
+        text = self._message_text(message)
+        if not text:
+            return ""
+        text = self._strip_bot_mention(text)
+        if len(text) > 1000:
+            text = text[:997].rstrip() + "..."
+
+        person_id = str(message.get("personId") or "")
+        person_email = str(message.get("personEmail") or "")
+        if person_id == self._bot_id:
+            name = self._bot_display_name or self._bot_email or "Hermes"
+        else:
+            name = await self._lookup_display_name(person_id)
+            if not name:
+                name = person_email or person_id or "unknown"
+
+        prefix = "[thread parent] " if is_parent else ""
+        return f"{prefix}{name}: {text}"
+
+    @staticmethod
+    def _message_text(message: Dict[str, Any]) -> str:
+        return str(message.get("text") or message.get("markdown") or "").strip()
 
     async def _download_attachments(self, files: List[str]) -> Tuple[List[str], List[str]]:
         media_urls: List[str] = []

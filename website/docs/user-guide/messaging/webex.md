@@ -105,7 +105,7 @@ WEBEX_WEBHOOK_PATH=/webex/webhook
 | **Direct space** | Hermes replies normally to messages and slash commands |
 | **Group space** | Free-form chat requires directly mentioning the bot |
 | **Group space slash command** | Recognized Hermes slash commands work directly, with or without a leading bot mention |
-| **Thread replies** | Hermes replies in the same Webex thread when `parentId` is present |
+| **Thread replies** | Hermes replies in the same Webex thread when `parentId` is present and loads recent thread context when first tagged in an existing thread |
 
 Examples in a group space:
 
