@@ -3,7 +3,7 @@
 File Operations Module
 
 Provides file manipulation capabilities (read, write, patch, search) that work
-across all terminal backends (local, docker, ssh, singularity, modal, daytona, vercel_sandbox).
+across all terminal backends (local, docker, ssh, singularity, modal, daytona).
 
 The key insight is that all file operations can be expressed as shell commands,
 so we wrap the terminal backend's execute() interface to provide a unified file API.
@@ -37,7 +37,6 @@ from tools.binary_extensions import BINARY_EXTENSIONS
 from agent.file_safety import (
     build_write_denied_paths,
     build_write_denied_prefixes,
-    get_safe_write_root as _shared_get_safe_write_root,
     is_write_denied as _shared_is_write_denied,
 )
 
@@ -74,15 +73,44 @@ def _strip_terminal_fence_leaks(text: str) -> str:
     return "".join(cleaned_lines)
 
 
-def _get_safe_write_root() -> Optional[str]:
-    """Return the resolved HERMES_WRITE_SAFE_ROOT path, or None if unset.
+def _detect_line_ending(sample: str) -> Optional[str]:
+    """Return the dominant line ending in ``sample`` or None if undetermined.
 
-    When set, all write_file/patch operations are constrained to this
-    directory tree.  Writes outside it are denied even if the target is
-    not on the static deny list.  Opt-in hardening for gateway/messaging
-    deployments that should only touch a workspace checkout.
+    Looks at the first few line breaks and picks ``\\r\\n`` if any are
+    present (Windows / DOS), otherwise ``\\n`` (Unix).  Returns ``None``
+    for empty / single-line content where we can't tell.  Used to
+    preserve the file's original line endings across write_file and
+    patch operations — without this the agent's bare-LF tool args
+    silently normalize Windows-line-ending files, and patch produces
+    mixed endings when only a substituted region changes.
     """
-    return _shared_get_safe_write_root()
+    if not sample:
+        return None
+    # Look at the first chunk — enough to tell, cheap to scan.
+    head = sample[:4096]
+    if "\r\n" in head:
+        return "\r\n"
+    if "\n" in head:
+        return "\n"
+    return None
+
+
+def _normalize_line_endings(text: str, target: str) -> str:
+    """Convert all line endings in ``text`` to ``target`` (``\\n`` or ``\\r\\n``).
+
+    Idempotent: ``_normalize_line_endings(_normalize_line_endings(x, "\\r\\n"), "\\r\\n") == _normalize_line_endings(x, "\\r\\n")``.
+    Strips lone ``\\r`` characters as well, so mixed-ending content is
+    homogenized in a single pass.
+    """
+    # First collapse to LF (handle CRLF and lone CR), then expand if target
+    # is CRLF.  Order matters: doing the replacements separately would
+    # double-convert a CRLF -> LFLF.
+    lf_normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    if target == "\n":
+        return lf_normalized
+    if target == "\r\n":
+        return lf_normalized.replace("\n", "\r\n")
+    return text
 
 
 def _is_write_denied(path: str) -> bool:
@@ -697,7 +725,83 @@ class ShellFileOperations(FileOperations):
         """Escape a string for safe use in shell commands."""
         # Use single quotes and escape any single quotes in the string
         return "'" + arg.replace("'", "'\"'\"'") + "'"
-    
+
+    def _atomic_write(self, path: str, content: str) -> "ExecuteResult":
+        """Write ``content`` to ``path`` atomically via temp-file + rename.
+
+        Streams ``content`` over stdin into a temp file in the SAME
+        directory as ``path`` (so the final ``mv`` is a real rename on the
+        same filesystem, not a non-atomic cross-device copy), preserves the
+        existing file's mode if it exists, then renames over the target.
+        On any failure the temp file is removed so we never leak a partial
+        ``.hermes-tmp`` file next to the user's data, and the original file
+        is left untouched. Content rides stdin so there is no ARG_MAX limit.
+
+        Returns an :class:`ExecuteResult`; ``exit_code == 0`` means the file
+        was swapped into place atomically. A non-zero exit means nothing was
+        renamed and the original (if any) is intact.
+        """
+        q_path = self._escape_shell_arg(path)
+        parent = os.path.dirname(path) or "."
+        q_parent = self._escape_shell_arg(parent)
+        # template basename: hidden so it doesn't show up in casual `ls`,
+        # carries a marker so an orphaned temp (only possible on a hard
+        # crash *between* cat and mv) is identifiable.
+        tmpl = self._escape_shell_arg(".hermes-tmp.XXXXXX")
+
+        # One shell script, fully quoted. Notes:
+        #  - `mktemp` lands the temp in the target's own dir (-p) so `mv` is
+        #    same-FS atomic; we fall back to a PID-stamped name if the
+        #    backend lacks mktemp (rare; busybox/macOS/Linux all ship it).
+        #  - `chmod --reference` is GNU-only, so we read the octal mode with
+        #    `stat` (GNU `-c%a` or BSD `-f%Lp`) and `chmod` it explicitly;
+        #    silent best-effort — a perms-copy failure must not abort the
+        #    write, the file still lands with default umask perms.
+        #  - `trap ... EXIT` guarantees the temp is removed on every error
+        #    path (cat failure, mv failure, signal) but NOT after a
+        #    successful mv (the temp no longer exists by then).
+        #  - we `cat >` the temp, then `mv -f` it over the target.
+        script = (
+            "set -e; "
+            f"d={q_parent}; t={q_path}; "
+            'tmp="$(mktemp -p "$d" ' + tmpl + ' 2>/dev/null '
+            '|| mktemp "$d/.hermes-tmp.$$.XXXXXX" 2>/dev/null '
+            '|| { tmp="$d/.hermes-tmp.$$"; : > "$tmp" && echo "$tmp"; })"; '
+            '[ -n "$tmp" ] || { echo "atomic write: could not create temp file" >&2; exit 1; }; '
+            "trap 'rm -f \"$tmp\"' EXIT; "
+            # preserve mode of an existing target (best-effort, never fatal)
+            'if [ -e "$t" ]; then '
+            'm="$(stat -c%a "$t" 2>/dev/null || stat -f%Lp "$t" 2>/dev/null || true)"; '
+            '[ -n "$m" ] && chmod "$m" "$tmp" 2>/dev/null || true; '
+            "fi; "
+            'cat > "$tmp"; '
+            'mv -f "$tmp" "$t"; '
+            "trap - EXIT"
+        )
+        return self._exec(script, stdin_data=content)
+
+    def _detect_file_line_ending(self, path: str, pre_content: Optional[str] = None) -> Optional[str]:
+        """Detect the dominant line ending of a file on disk.
+
+        If ``pre_content`` is already available (we just read the file
+        for lint/LSP purposes), inspect that — zero extra exec calls.
+        Otherwise issue a tiny ``head -c 4096`` to sample the first 4KB.
+
+        Returns ``"\\r\\n"`` for CRLF (Windows), ``"\\n"`` for LF (Unix),
+        or ``None`` if undetermined (new file, empty file, single-line
+        file with no line break in the first chunk).
+        """
+        if pre_content:
+            return _detect_line_ending(pre_content)
+        # File may not exist (new write) — `head` exits 0 with empty
+        # stdout in that case which yields None below.  Cheap probe.
+        head_cmd = f"head -c 4096 {self._escape_shell_arg(path)} 2>/dev/null"
+        head_result = self._exec(head_cmd)
+        if head_result.exit_code != 0 or not head_result.stdout:
+            return None
+        return _detect_line_ending(head_result.stdout)
+
+
     def _unified_diff(self, old_content: str, new_content: str, filename: str) -> str:
         """Generate unified diff between old and new content."""
         old_lines = old_content.splitlines(keepends=True)
@@ -975,6 +1079,17 @@ class ShellFileOperations(FileOperations):
             if read_result.exit_code == 0 and read_result.stdout:
                 pre_content = read_result.stdout
 
+        # ── Line-ending preservation (Roo Code pattern) ──────────────
+        # If the file existed with CRLF endings and the agent's content
+        # has bare LFs, convert to CRLF before writing.  Otherwise the
+        # write silently normalizes a Windows-line-ending file (and patch
+        # produces mixed endings when only a substituted region changes).
+        # Detect from a small head sample to avoid reading the full file
+        # for line-ending purposes alone.
+        original_ending = self._detect_file_line_ending(path, pre_content)
+        if original_ending == "\r\n":
+            content = _normalize_line_endings(content, "\r\n")
+
         # Snapshot LSP diagnostics for this file (best-effort) so the
         # post-write LSP layer can return only diagnostics introduced
         # by this specific edit.  Mirrors claude-code's
@@ -992,10 +1107,22 @@ class ShellFileOperations(FileOperations):
             if mkdir_result.exit_code == 0:
                 dirs_created = True
 
-        # Write via stdin pipe — content bypasses shell arg parsing entirely,
-        # so there's no ARG_MAX limit regardless of file size.
-        write_cmd = f"cat > {self._escape_shell_arg(path)}"
-        write_result = self._exec(write_cmd, stdin_data=content)
+        # Write atomically: stream into a temp file in the SAME directory,
+        # then ``mv`` it over the target. The rename is atomic on POSIX
+        # (and on every backend FS we run on), so a crash / power loss /
+        # truncated pipe mid-write leaves the original file intact instead
+        # of a half-written corrupt file. Same-directory is load-bearing —
+        # ``mv`` across filesystems degrades to copy+unlink, which is NOT
+        # atomic; keeping the temp beside the target guarantees a real
+        # rename. Content still rides stdin so there's no ARG_MAX limit.
+        #
+        # The temp file is created with ``mktemp`` (collision-safe) when the
+        # backend has it, falling back to a PID-stamped name otherwise. We
+        # then chmod the temp to match the existing file's mode (if any) so
+        # the atomic swap doesn't silently widen or narrow permissions, and
+        # clean the temp up on any failure so we never leak a ``.hermes-tmp``
+        # turd next to the user's file.
+        write_result = self._atomic_write(path, content)
 
         if write_result.exit_code != 0:
             return WriteResult(error=f"Failed to write file: {write_result.stdout}")
@@ -1082,6 +1209,19 @@ class ShellFileOperations(FileOperations):
             except Exception:
                 pass
             return PatchResult(error=err_msg)
+
+        # ── Line-ending preservation ──────────────────────────────────
+        # Models nearly always send old_string/new_string with bare LF
+        # in tool args (JSON-encoded), but the file may have CRLF on
+        # disk.  After fuzzy_find_and_replace, ``new_content`` is a
+        # mixed-ending string: the substituted region is LF, surrounding
+        # text keeps the file's CRLF.  Normalize the whole thing to the
+        # file's detected line ending so the on-disk file is consistent
+        # and the unified diff below reflects the actual change.
+        file_ending = _detect_line_ending(content)
+        if file_ending:
+            new_content = _normalize_line_endings(new_content, file_ending)
+
         # Write back
         write_result = self.write_file(path, new_content)
         if write_result.error:
