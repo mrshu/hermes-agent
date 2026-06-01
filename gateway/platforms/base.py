@@ -484,7 +484,7 @@ sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
 
 from gateway.config import Platform, PlatformConfig
 from gateway.session import SessionSource, build_session_key
-from hermes_constants import get_hermes_dir, get_hermes_home
+from hermes_constants import get_default_hermes_root, get_hermes_dir, get_hermes_home
 
 
 GATEWAY_SECRET_CAPTURE_UNSUPPORTED_MESSAGE = (
@@ -827,6 +827,7 @@ def cache_video_from_bytes(data: bytes, ext: str = ".mp4") -> str:
 DOCUMENT_CACHE_DIR = get_hermes_dir("cache/documents", "document_cache")
 SCREENSHOT_CACHE_DIR = get_hermes_dir("cache/screenshots", "browser_screenshots")
 _HERMES_HOME = get_hermes_home()
+_HERMES_ROOT = get_default_hermes_root()
 MEDIA_DELIVERY_ALLOW_DIRS_ENV = "HERMES_MEDIA_ALLOW_DIRS"
 MEDIA_DELIVERY_TRUST_RECENT_ENV = "HERMES_MEDIA_TRUST_RECENT_FILES"
 MEDIA_DELIVERY_TRUST_RECENT_SECONDS_ENV = "HERMES_MEDIA_TRUST_RECENT_SECONDS"
@@ -954,11 +955,14 @@ def _media_delivery_denied_paths() -> List[Path]:
     home = Path(os.path.expanduser("~"))
     for sub in _MEDIA_DELIVERY_DENIED_HOME_SUBPATHS:
         denied.append(home / sub)
-    # The Hermes home itself contains credentials (auth.json, .env) — only the
-    # cache subdirectories under it are explicitly allowlisted above.
-    denied.append(_HERMES_HOME / ".env")
-    denied.append(_HERMES_HOME / "auth.json")
-    denied.append(_HERMES_HOME / "credentials")
+    # The active Hermes profile and shared Hermes root both contain control
+    # files and credentials. Only cache subdirectories under them are
+    # explicitly allowlisted above.
+    for hermes_root in (_HERMES_HOME, _HERMES_ROOT):
+        denied.append(hermes_root / ".env")
+        denied.append(hermes_root / "auth.json")
+        denied.append(hermes_root / "credentials")
+        denied.append(hermes_root / "config.yaml")
     return denied
 
 
@@ -1191,10 +1195,12 @@ _MEDIA_EXT_ALTERNATION = "|".join(
 # bare-path detector (extract_local_files) downstream rather than silently
 # deleted. Shared by the non-streaming dispatch path and the streaming
 # consumer so both behave identically.
+# Path anchors: ``~/`` (Unix home-relative), ``/`` (Unix absolute),
+# ``X:\\`` or ``X:/`` (Windows drive-letter absolute — #34632).
 MEDIA_TAG_CLEANUP_RE = re.compile(
     r'''[`"']?MEDIA:\s*'''
     r'''(?P<path>`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|'''
-    r'''(?:~/|/)\S+(?:[^\S\n]+\S+)*?\.(?:''' + _MEDIA_EXT_ALTERNATION + r'''))'''
+    r'''(?:~/|/|[A-Za-z]:[/\\])\S+(?:[^\S\n]+\S+)*?\.(?:''' + _MEDIA_EXT_ALTERNATION + r'''))'''
     r'''(?=[\s`"',;:)\]}]|$)[`"']?''',
     re.IGNORECASE,
 )
@@ -2573,6 +2579,88 @@ class BasePlatformAdapter(ABC):
                 logger.warning("Skipping unsafe local file path: %s", _log_safe_path(raw))
         return safe_paths
 
+
+    @staticmethod
+    def _mask_protected_spans(content: str) -> str:
+        """Replace content inside fenced code blocks, inline code spans,
+        and blockquotes with spaces to prevent MEDIA: false positives.
+
+        Preserves character count so regex match offsets stay valid.
+        Skips masking backtick-quoted paths in MEDIA: tags (e.g.
+        ``MEDIA:`/path/to/file.png` ``) to avoid breaking path extraction.
+        """
+        chars = list(content)
+        n = len(chars)
+
+        # Build list of (start, end) spans to mask
+        spans: list = []
+
+        # Fenced code blocks: ```...```
+        for m in re.finditer(r'```[^\n]*\n.*?```', content, re.DOTALL):
+            spans.append((m.start(), m.end()))
+
+        # Inline code: `...` but NOT backtick-quoted paths in MEDIA: tags
+        for m in re.finditer(r'`[^`\n]+`', content):
+            start = m.start()
+            # Check if this is a backtick-quoted path after MEDIA:
+            prefix = content[max(0, start - 20):start]
+            if re.search(r'MEDIA:\s*$', prefix):
+                continue  # This is a MEDIA path quote, not inline code
+            spans.append((start, m.end()))
+
+        # Blockquote lines: > at line start
+        for m in re.finditer(r'^>.*$', content, re.MULTILINE):
+            spans.append((m.start(), m.end()))
+
+        # Apply masking
+        for start, end in spans:
+            for i in range(start, end):
+                if chars[i] != '\n':
+                    chars[i] = ' '
+
+        return ''.join(chars)
+
+
+    @staticmethod
+    def _mask_json_string_media(content: str) -> str:
+        """Blank out ``MEDIA:<bare-path>`` occurrences that sit inside a JSON
+        string *value* so they are never delivered as real attachments.
+
+        Serialized tool results frequently embed a previous reply's text, e.g.::
+
+            {"result": "MEDIA:/Users/x/.hermes/media/generated/stale.png"}
+
+        Here the ``MEDIA:`` is part of stored text, not an outbound directive,
+        but the bare-path branch of ``MEDIA_TAG_CLEANUP_RE`` would still match it
+        and re-deliver a stale file. (Regression report #34375.)
+
+        The discriminator is precise so legitimate tags are untouched:
+
+        * Only spans opened by a JSON value-context quote (``:``, ``,``, ``{`` or
+          ``[`` immediately before the ``"``) are considered.
+        * Within such a span, only a ``MEDIA:`` followed by a **bare** path
+          (``/``, ``~/`` or ``X:\\``) is masked. A ``MEDIA:"..."`` quoted-path
+          tag — a real LLM output format the extractor supports — is not bare and
+          is left alone.
+        * Tags at line start, after prose whitespace, or indented are outside any
+          JSON value span and are never affected.
+
+        Offsets are preserved (matched chars replaced with spaces, newlines kept)
+        so downstream match positions stay valid.
+        """
+        if '"' not in content or "MEDIA:" not in content:
+            return content
+        chars = list(content)
+        # JSON value-context string: a quote preceded by : , { or [ (optional ws),
+        # capturing the (escape-aware) string body up to the closing quote.
+        for m in re.finditer(r'(?<=[:,{\[])\s*"((?:[^"\\\n]|\\.)*)"', content):
+            seg = m.group(1)
+            if re.search(r'MEDIA:\s*(?:~/|/|[A-Za-z]:[/\\])', seg):
+                for i in range(m.start(1), m.end(1)):
+                    if chars[i] != '\n':
+                        chars[i] = ' '
+        return ''.join(chars)
+
     @staticmethod
     def extract_media(content: str) -> Tuple[List[Tuple[str, bool]], str]:
         """
@@ -2615,7 +2703,15 @@ class BasePlatformAdapter(ABC):
         # set is the shared MEDIA_DELIVERY_EXTS source of truth (built once into
         # MEDIA_TAG_CLEANUP_RE) so it can never drift from extract_local_files.
         media_pattern = MEDIA_TAG_CLEANUP_RE
-        for match in media_pattern.finditer(content):
+        # Mask example/stored MEDIA: paths before scanning so they are never
+        # delivered as real attachments:
+        #  - code blocks / inline code / blockquotes hold prose examples (#35695)
+        #  - serialized JSON string values hold stored tool-result text (#34375)
+        # Both maskers are offset-preserving (chars -> spaces) so match offsets
+        # stay valid; chaining them masks the union of both protected regions.
+        scan_content = BasePlatformAdapter._mask_protected_spans(content)
+        scan_content = BasePlatformAdapter._mask_json_string_media(scan_content)
+        for match in media_pattern.finditer(scan_content):
             path = match.group("path").strip()
             if len(path) >= 2 and path[0] == path[-1] and path[0] in "`\"'":
                 path = path[1:-1].strip()
@@ -2628,10 +2724,24 @@ class BasePlatformAdapter(ABC):
                     # and dropping every other attachment in the response.
                     continue
 
-        # Remove MEDIA tags from content (including surrounding quote/backtick wrappers)
+        # Remove the delivered MEDIA tags from the user-visible text. Mask a
+        # length-equal copy of ``cleaned`` (same union of protected regions) to
+        # *locate* the real tag spans, then delete exactly those spans from the
+        # *unmasked* ``cleaned``. Masking is only a locator — protected spans
+        # (code blocks, quotes, JSON-embedded MEDIA: text) must survive verbatim
+        # in the delivered text, not be blanked to whitespace. Masking
+        # ``cleaned`` (not ``content``) keeps offsets valid after the
+        # [[audio_as_voice]] / [[as_document]] directives are removed.
         if media:
-            cleaned = media_pattern.sub('', cleaned)
-            cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+            masked_cleaned = BasePlatformAdapter._mask_protected_spans(cleaned)
+            masked_cleaned = BasePlatformAdapter._mask_json_string_media(masked_cleaned)
+            spans = [m.span() for m in media_pattern.finditer(masked_cleaned)]
+            if spans:
+                chars = list(cleaned)
+                for start, end in sorted(spans, reverse=True):
+                    del chars[start:end]
+                cleaned = "".join(chars)
+                cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
         
         return media, cleaned
 
@@ -2665,9 +2775,10 @@ class BasePlatformAdapter(ABC):
 
         # (?<![/:\w.]) prevents matching inside URLs (e.g. https://…/img.png)
         #             and relative paths (./foo.png)
-        # (?:~/|/)    anchors to absolute or home-relative paths
+        # (?:~/|/)    anchors to absolute or home-relative Unix paths
+        # (?:[A-Za-z]:[/\\]) anchors to Windows drive-letter paths (#34632)
         path_re = re.compile(
-            r'(?<![/:\w.])(?:~/|/)(?:[\w.\-]+/)*[\w.\-]+\.(?:' + ext_part + r')\b',
+            r'(?<![/:\w.])(?:~/|/|[A-Za-z]:[/\\])(?:[\w.\-]+[/\\])*[\w.\-]+\.(?:' + ext_part + r')\b',
             re.IGNORECASE,
         )
 
@@ -3756,6 +3867,7 @@ class BasePlatformAdapter(ABC):
 
             # Call the handler (this can take a while with tool calls)
             response = await self._message_handler(event)
+            is_ephemeral_response = isinstance(response, EphemeralReply)
 
             # Slash-command handlers may return an EphemeralReply sentinel to
             # request that their reply message auto-delete after a TTL (used
@@ -3814,12 +3926,16 @@ class BasePlatformAdapter(ABC):
                 if images:
                     logger.info("[%s] extract_images found %d image(s) in response (%d chars)", self.name, len(images), len(response))
 
-                # Auto-detect bare local file paths for native media delivery
-                # (helps small models that don't use MEDIA: syntax)
-                local_files, text_content = self.extract_local_files(text_content)
-                local_files = self.filter_local_delivery_paths(local_files)
-                if local_files:
-                    logger.info("[%s] extract_local_files found %d file(s) in response", self.name, len(local_files))
+                local_files = []
+                if not is_ephemeral_response:
+                    # Auto-detect bare local file paths for native media delivery
+                    # (helps small models that don't use MEDIA: syntax). Skip
+                    # system/command notices so config paths stay visible text
+                    # instead of becoming native uploads.
+                    local_files, text_content = self.extract_local_files(text_content)
+                    local_files = self.filter_local_delivery_paths(local_files)
+                    if local_files:
+                        logger.info("[%s] extract_local_files found %d file(s) in response", self.name, len(local_files))
                 
                 # Auto-TTS: if voice message, generate audio FIRST (before sending text)
                 # Gated via ``_should_auto_tts_for_chat``: fires when the chat has

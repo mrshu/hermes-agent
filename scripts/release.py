@@ -45,8 +45,12 @@ ACP_REGISTRY_MANIFEST = REPO_ROOT / "acp_registry" / "agent.json"
 
 # Auto-extracted from noreply emails + manual overrides
 AUTHOR_MAP = {
+    "74339271+SaguaroDev@users.noreply.github.com": "SaguaroDev",
+    "zhipengli@thebrainly.ai": "a1245582339",
+    "mathijs.vd.hurk@gmail.com": "mathijsvandenhurk",
     "drpelagik@gmail.com": "SeaXen",
     "lengr@users.noreply.github.com": "LengR",
+    "17255546+CharZhou@users.noreply.github.com": "CharZhou",
     "metalclaudbot@gmail.com": "HashClawAI",
     "tonybear55665566@gmail.com": "TonyPepeBear",
     "kaspersniels@gmail.com": "nielskaspers",
@@ -78,6 +82,7 @@ AUTHOR_MAP = {
     "interstellar.consulting@gmail.com": "Interstellar-code",
     "33978413+Interstellar-code@users.noreply.github.com": "Interstellar-code",
     "tillfalko@gmail.com": "tillfalko",
+    "hi@fesalfayed.com": "fesalfayed",
     # teknium (multiple emails)
     "teknium1@gmail.com": "teknium1",
     "kenyon1977@gmail.com": "kenyonxu",
@@ -223,6 +228,7 @@ AUTHOR_MAP = {
     "264291321+v1b3coder@users.noreply.github.com": "v1b3coder",
     "silverchris@foxmail.com": "ming1523",
     "maksesipov@gmail.com": "Qwinty",
+    "byquenox@gmail.com": "Que0x",
     "denisamania@gmail.com": "CalmProton",
     "308068+mbac@users.noreply.github.com": "mbac",
     "nicoechaniz@altermundi.net": "nicoechaniz",
@@ -655,6 +661,7 @@ AUTHOR_MAP = {
     "incharge.automation@gmail.com": "inchargeautomation-lab",
     "danielrpike9@gmail.com": "Bartok9",
     "96944678+ymylive@users.noreply.github.com": "sweetcornna",
+    "laflamme@illinoisalumni.org": "briancl2",
     "skozyuk@cruxexperts.com": "CruxExperts",
     "154585401+LeonSGP43@users.noreply.github.com": "LeonSGP43",
     "12250313+Kailigithub@users.noreply.github.com": "Kailigithub",
@@ -1026,6 +1033,7 @@ AUTHOR_MAP = {
     "holynn@placeholder.local": "holynn-q",
     "agent@hermes.local": "jacdevos",
     "sunsky.lau@gmail.com": "liuhao1024",
+    "haaasined@gmail.com": "VinciZhu",
     "fabianoeq@gmail.com": "rodrigoeqnit",
     "178342791+sgtworkman@users.noreply.github.com": "sgtworkman",
     "qiuqfang98@qq.com": "keepcalmqqf",
@@ -1402,6 +1410,12 @@ AUTHOR_MAP = {
     "peter.yuqin@gmail.com": "WuKongAI-CMU",  # PR #10082 (reject symlinked audio inputs)
     "sunil.nitie@gmail.com": "Sunil123135",  # PR #31031 (Windows Docker Desktop compose)
     "weichangyuwcy@gmail.com": "ChyuWei",  # PR #30987 (TUI TTS env var on voice off)
+    # batch salvage PR #35758 (perf micro-fixes)
+    "116212274+amathxbt@users.noreply.github.com": "amathxbt",  # PR #22155 (cache tool_output_limits)
+    "takis312@hotmail.com": "ErnestHysa",  # PRs #32636/#32708 (MCP asyncio.sleep + O(n^2) watcher drain)
+    "me@simontaggart.com": "SiTaggart",  # PR #35583 (docker_forward_env empty-secret .env fallback)
+    "2663402852@qq.com": "x1am1",  # PR #35098 (chown root-owned top-level HERMES_HOME state files)
+    "nicsequenzy@gmail.com": "polnikale",  # PR #35717 (discover Playwright headless_shell browser)
 }
 
 
@@ -1502,6 +1516,21 @@ def update_version_files(semver: str, calver_date: str):
         flags=re.MULTILINE,
     )
     PYPROJECT_FILE.write_text(pyproject)
+
+    # Keep the desktop Electron app's package.json version in lockstep with the
+    # Python package version. The desktop About panel reads the live Hermes
+    # version at runtime, but app.getVersion()/packaging metadata still come
+    # from this field, so it must track pyproject to avoid drift.
+    desktop_pkg = REPO_ROOT / "apps" / "desktop" / "package.json"
+    if desktop_pkg.exists():
+        pkg_text = desktop_pkg.read_text(encoding="utf-8")
+        pkg_text = re.sub(
+            r'("version"\s*:\s*)"[^"]+"',
+            rf'\g<1>"{semver}"',
+            pkg_text,
+            count=1,
+        )
+        desktop_pkg.write_text(pkg_text, encoding="utf-8")
 
     # Update ACP Registry manifest + npm launcher (must stay version-locked
     # with pyproject — enforced by tests/acp/test_registry_manifest.py).

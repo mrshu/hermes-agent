@@ -402,8 +402,10 @@ class TestSendMessageTool:
             user_id=None,
         )
 
-    def test_media_only_message_uses_placeholder_for_mirroring(self):
+    def test_media_only_message_uses_placeholder_for_mirroring(self, tmp_path):
         config, telegram_cfg = _make_config()
+        media_path = tmp_path / "example.ogg"
+        media_path.write_bytes(b"OggS" + b"\x00" * 32)
 
         with patch("gateway.config.load_gateway_config", return_value=config), \
              patch("tools.interrupt.is_interrupted", return_value=False), \
@@ -415,7 +417,7 @@ class TestSendMessageTool:
                     {
                         "action": "send",
                         "target": "telegram:-1001",
-                        "message": "MEDIA:/tmp/example.ogg",
+                        "message": f"MEDIA:{media_path}",
                     }
                 )
             )
@@ -427,7 +429,7 @@ class TestSendMessageTool:
             "-1001",
             "",
             thread_id=None,
-            media_files=[("/tmp/example.ogg", False)],
+            media_files=[(str(media_path.resolve()), False)],
             force_document=False,
         )
         mirror_mock.assert_called_once_with(
