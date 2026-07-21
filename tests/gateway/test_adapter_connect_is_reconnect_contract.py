@@ -32,9 +32,9 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# Directories that hold platform adapters. Each entry is a directory
-# whose immediate children are either ``adapter.py`` files or
-# sub-packages that expose one.
+# Platform adapters ship either as direct modules under ``gateway/platforms``
+# or as plugin packages under ``plugins/platforms``. Scan every Python module
+# in both trees and let ``_find_adapter_classes`` select actual adapters.
 ADAPTER_ROOTS = [
     REPO_ROOT / "gateway" / "platforms",
     REPO_ROOT / "plugins" / "platforms",
@@ -42,19 +42,17 @@ ADAPTER_ROOTS = [
 
 
 def _iter_adapter_files() -> list[Path]:
-    """Every ``*adapter*.py`` under the two adapter roots.
+    """Every Python module that could define a platform adapter.
 
-    We intentionally cast a wide net (any ``adapter.py`` / ``*_adapter.py``
-    inside these trees) so a new platform can't sneak in without the
-    contract check firing.
+    Direct core adapters conventionally live in files named after their
+    platform (for example, ``webex.py``), while plugin adapters use
+    ``adapter.py``. Restricting discovery to adapter-named files silently
+    skips the former, defeating this contract test.
     """
     files: list[Path] = []
     for root in ADAPTER_ROOTS:
-        if not root.is_dir():
-            continue
-        for path in root.rglob("*.py"):
-            if path.name == "adapter.py" or path.stem.endswith("_adapter"):
-                files.append(path)
+        if root.is_dir():
+            files.extend(root.rglob("*.py"))
     return sorted(files)
 
 
