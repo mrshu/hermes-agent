@@ -433,26 +433,56 @@ def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
 
 
 def should_use_direct_api_call(agent) -> bool:
-    """Whether a cron OpenAI-wire request should skip the interrupt worker.
+    """Whether an OpenAI-wire request should skip the interrupt worker.
 
-    Issue #62151 is specific to OpenRouter's chat-completions path inside the
-    gateway cron thread stack. Keep native/Codex/Bedrock/MoA transports on their
-    established workers: their cancellation and client ownership differ, and
-    the report provides no evidence that those paths share the pre-HTTP wedge.
+    Two nested-pool contexts wedge before the socket opens when the request
+    is pushed onto yet another daemon worker thread:
+
+    - Gateway cron turns (#62151): gateway asyncio loop → cron thread →
+      interrupt worker. Fixed by running inline.
+    - Delegated children (#60203): gateway loop → async-delegation executor
+      (module-lifetime daemon pool) → per-child timeout executor → interrupt
+      worker. Same fingerprint after multi-day gateway uptime — children hang
+      at their FIRST API call with zero stale-detector output (the worker
+      never reaches dispatch), all providers, restart cures it. The cron fix
+      originally excluded delegation "for lack of evidence"; #60203 is that
+      evidence.
+
+    Running inline drops the deepest thread layer (whose only job is
+    interactive-interrupt responsiveness). Interrupts still work: the inline
+    path registers ``agent._active_request_abort``, which ``interrupt()``
+    invokes cross-thread to shut the active sockets — the same mechanism the
+    async-delegation stall monitor (#72227) relies on.
+
+    Keep native/Codex/Bedrock/MoA transports on their established workers:
+    their cancellation and client ownership differ.
     """
-    return (
-        getattr(agent, "platform", None) == "cron"
-        and getattr(agent, "api_mode", None) == "chat_completions"
-        and getattr(agent, "provider", None) != "moa"
-    )
+    if getattr(agent, "api_mode", None) != "chat_completions":
+        return False
+    if getattr(agent, "provider", None) == "moa":
+        return False
+    if getattr(agent, "platform", None) == "cron":
+        return True
+    # Delegated child (delegate_task sync or background) — detected via the
+    # execution ContextVar set by _run_single_child, with the agent's own
+    # platform stamp as a fallback for callers that bypass the runner.
+    try:
+        from agent.delegation_context import is_delegated_child_context
+
+        if is_delegated_child_context():
+            return True
+    except Exception:
+        pass
+    return getattr(agent, "platform", None) == "subagent"
 
 
 def direct_api_call(agent, api_kwargs: dict):
     """Run a non-streaming LLM call inline on the conversation thread.
 
-    Used when ``should_use_direct_api_call`` is True. Skips the interrupt worker
-    (whose only job is interactive-interrupt responsiveness, which this context
-    does not have) so the nested-pool deadlock (#62151) cannot occur. Because the
+    Used when ``should_use_direct_api_call`` is True (cron turns and
+    delegated children). Skips the interrupt worker (whose only job is
+    interactive-interrupt responsiveness, which these contexts do not have)
+    so the nested-pool deadlock (#62151, #60203) cannot occur. Because the
     request runs in-flight normally, the per-request OpenAI client's own httpx
     timeout (provider ``request_timeout_seconds`` / ``HERMES_API_TIMEOUT``) bounds
     a genuinely hung provider — the same bound interactive calls already rely on.
@@ -463,7 +493,7 @@ def direct_api_call(agent, api_kwargs: dict):
     request_client_lock = threading.Lock()
 
     def _abort_active_request(reason: str) -> None:
-        """Abort the inline request from cron's watchdog/interrupt thread."""
+        """Abort the inline request from a watchdog/interrupt thread."""
         with request_client_lock:
             request_client = request_client_holder["client"]
         if request_client is not None:
@@ -1076,6 +1106,7 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
             tools=tools_for_api,
             reasoning_config=agent.reasoning_config,
             session_id=getattr(agent, "session_id", None),
+            base_url=agent.base_url,
             max_tokens=agent.max_tokens,
             timeout=agent._resolved_api_call_timeout(),
             request_overrides=agent.request_overrides,
@@ -1598,29 +1629,28 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         )
         return agent._try_activate_fallback(reason)
 
-    # Skip entries that resolve to the current (provider, model) — falling
-    # back to the same backend that just failed loops the failure. Compare
-    # base_url too so two distinct custom_providers entries pointing at the
-    # same shim/proxy URL also dedup. See issue #22548.
-    current_provider = (getattr(agent, "provider", "") or "").strip().lower()
-    current_model = (getattr(agent, "model", "") or "").strip()
-    current_base_url = str(getattr(agent, "base_url", "") or "").rstrip("/").lower()
-    fb_base_url_for_dedup = (fb.get("base_url") or "").strip().rstrip("/").lower()
-    if fb_provider == current_provider and fb_model == current_model:
+    # Skip entries that resolve to the same backend that just failed —
+    # falling back to it loops the failure. Identity semantics (which axes
+    # distinguish two backends, shim aliases, first-class credential
+    # surfaces, multi-endpoint pools) are owned by agent.backend_identity —
+    # see #22548, #70893, #62984. Do not re-implement comparisons here.
+    from agent.backend_identity import BackendIdentity, should_skip_candidate
+
+    current_ident = BackendIdentity.build(
+        provider=getattr(agent, "provider", ""),
+        model=getattr(agent, "model", ""),
+        base_url=str(getattr(agent, "base_url", "") or ""),
+    )
+    fb_ident = BackendIdentity.build(
+        provider=fb_provider,
+        model=fb_model,
+        base_url=(fb.get("base_url") or ""),
+    )
+    if should_skip_candidate(fb_ident, current_ident):
         logger.warning(
-            "Fallback skip: chain entry %s/%s matches current provider/model",
-            fb_provider, fb_model,
-        )
-        return agent._try_activate_fallback(reason)
-    if (
-        fb_base_url_for_dedup
-        and current_base_url
-        and fb_base_url_for_dedup == current_base_url
-        and fb_model == current_model
-    ):
-        logger.warning(
-            "Fallback skip: chain entry base_url %s matches current backend",
-            fb_base_url_for_dedup,
+            "Fallback skip: chain entry %s/%s resolves to the same backend "
+            "as the current one (%s)",
+            fb_provider, fb_model, current_ident.base_url or current_ident.provider,
         )
         return agent._try_activate_fallback(reason)
 
@@ -1712,6 +1742,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         agent._config_context_length = None
         agent.model = fb_model
         agent.provider = fb_provider
+        agent.requested_provider = fb_provider
         agent.base_url = fb_base_url
         agent.api_mode = fb_api_mode
         if hasattr(agent, "_transport_cache"):
@@ -1738,6 +1769,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
                     fb_provider, fb_model, _pool_provider,
                 )
                 agent._credential_pool = None
+                agent._credential_pool_entry_id = None
         if getattr(agent, "_credential_pool", None) is None:
             try:
                 from agent.credential_pool import load_pool
@@ -1799,6 +1831,9 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
                 # timeout takes effect on the very next fallback request,
                 # not only after a later credential-rotation rebuild.
                 agent._replace_primary_openai_client(reason="fallback_timeout_apply")
+
+        from agent.agent_runtime_helpers import sync_credential_pool_entry_id
+        sync_credential_pool_entry_id(agent)
 
         # Re-evaluate prompt caching for the new provider/model
         agent._use_prompt_caching, agent._use_native_cache_layout = (
@@ -1945,7 +1980,17 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
             for internal_key in [k for k in api_msg if isinstance(k, str) and k.startswith("_")]:
                 api_msg.pop(internal_key, None)
             if _needs_sanitize:
-                agent._sanitize_tool_calls_for_strict_api(api_msg, model=agent.model)
+                # In MoA mode, agent.model is the virtual preset name,
+                # not the actual aggregator model.  Resolve the real
+                # aggregator model so Gemini preserves thought_signature.
+                _sanitize_model = agent.model
+                if agent.provider == "moa":
+                    _moa_client = getattr(agent, "client", None)
+                    if _moa_client is not None:
+                        _agg_slot = getattr(_moa_client, "last_aggregator_slot", None)
+                        if _agg_slot and _agg_slot.get("model"):
+                            _sanitize_model = _agg_slot["model"]
+                agent._sanitize_tool_calls_for_strict_api(api_msg, model=_sanitize_model)
             api_messages.append(api_msg)
 
         effective_system = agent._cached_system_prompt or ""
@@ -2462,7 +2507,11 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
     request_client_holder = {"client": None, "diag": None, "owner_tid": None}
     # Transport kind of the registered request client — see the non-streaming
     # variant. Routes _close_request_client_once to anthropic vs openai abort/
-    # close helpers (#67142).
+    # close helpers (#67142). ``kind="stream"`` registers a per-request
+    # *stream handle* instead of a client — used under the MoA facade, whose
+    # singleton client has no per-request sockets to abort
+    # (_abort_request_openai_client is a no-op on it), so interrupts must
+    # close the stream object itself (#57354).
     request_client_kind = {"value": "openai"}
     request_client_lock = threading.Lock()
     # Request-local cancellation flag — see interruptible_api_call for the full
@@ -2482,6 +2531,44 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             request_client_holder["owner_tid"] = threading.get_ident()
         return client
 
+    def _stream_close_callable(stream):
+        close = getattr(stream, "close", None)
+        if callable(close):
+            return close
+        response = getattr(stream, "response", None)
+        close = getattr(response, "close", None)
+        if callable(close):
+            return close
+        return None
+
+    def _set_request_stream_handle(stream):
+        # Register the per-request *stream* under kind="stream" so an
+        # interrupt closes the stream handle itself. Under the MoA facade the
+        # registered "client" is the shared facade singleton whose
+        # per-request abort helpers are no-ops, leaving the underlying HTTP
+        # stream open until the provider drained it (#57354).
+        if _stream_close_callable(stream) is None:
+            return stream
+        with request_client_lock:
+            request_client_holder["client"] = stream
+            request_client_kind["value"] = "stream"
+            request_client_holder["owner_tid"] = threading.get_ident()
+        return stream
+
+    def _close_request_stream_handle(stream, reason: str) -> None:
+        close = _stream_close_callable(stream)
+        if close is None:
+            return
+        try:
+            close()
+            logger.info("Streaming response handle closed (%s)", reason)
+        except Exception as exc:
+            logger.debug(
+                "Streaming response handle close failed (%s): %s",
+                reason,
+                exc,
+            )
+
     def _close_request_client_once(reason: str) -> None:
         # See #29507 explanation in the non-streaming variant above. A
         # stranger thread (the interrupt-check / stale-stream detector loop)
@@ -2489,9 +2576,15 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         # so the worker thread retains ownership of the FD release.
         with request_client_lock:
             request_client = request_client_holder.get("client")
+            request_kind = request_client_kind.get("value", "openai")
             owner_tid = request_client_holder.get("owner_tid")
+            # A registered stream handle (kind="stream", MoA facade path) is
+            # safe to close from any thread — closing IS the abort — so the
+            # stranger-thread ownership carve-out only applies to real
+            # per-request clients (#57354).
             stranger_thread = (
-                request_client is not None
+                request_kind != "stream"
+                and request_client is not None
                 and owner_tid is not None
                 and owner_tid != threading.get_ident()
             )
@@ -2500,8 +2593,9 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 request_client_holder["owner_tid"] = None
         if request_client is None:
             return
-        kind = request_client_kind.get("value", "openai")
-        if kind == "anthropic_messages":
+        if request_kind == "stream":
+            _close_request_stream_handle(request_client, reason)
+        elif request_kind == "anthropic_messages":
             if stranger_thread:
                 agent._abort_request_anthropic_client(request_client, reason=reason)
             else:
@@ -2680,6 +2774,11 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         _diag = agent._stream_diag_init()
         request_client_holder["diag"] = _diag
         stream = request_client.chat.completions.create(**stream_kwargs)
+        if agent.provider == "moa":
+            # The MoA facade is a shared singleton — abort/close of the
+            # registered client is a no-op, so register the stream handle
+            # itself for interrupt teardown (#57354).
+            stream = _set_request_stream_handle(stream)
         # Claim the delta sink for THIS attempt (#65991). If a prior attempt's
         # stream is somehow still alive (a stale-stream reconnect whose socket
         # abort raced), this claim supersedes it so its late chunks are fenced
@@ -3379,13 +3478,9 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                         # already worker-owned-closed by _close_request_client_once
                         # above; the next attempt builds a fresh one. The shared
                         # _anthropic_client is never closed from inside a request.
-                        if agent.api_mode != "anthropic_messages":
-                            try:
-                                agent._replace_primary_openai_client(
-                                    reason="stream_mid_tool_retry_pool_cleanup"
-                                )
-                            except Exception:
-                                pass
+                        # #70773: same FD-recycle corruption vector for OpenAI.
+                        # The shared client will be replaced lazily by
+                        # _ensure_primary_openai_client on the next attempt.
                         continue
 
                     # SSE error events from proxies (e.g. OpenRouter sends
@@ -3444,13 +3539,9 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                             # above; next attempt builds fresh), so the shared
                             # _anthropic_client is never closed from inside a
                             # request — only the OpenAI-wire primary is refreshed.
-                            if agent.api_mode != "anthropic_messages":
-                                try:
-                                    agent._replace_primary_openai_client(
-                                        reason="stream_retry_pool_cleanup"
-                                    )
-                                except Exception:
-                                    pass
+                            # #70773: same FD-recycle corruption vector for OpenAI.
+                            # The shared client will be replaced lazily by
+                            # _ensure_primary_openai_client on the next attempt.
                             continue
                         # Retries exhausted. Log the final failure with
                         # full diagnostic detail (chain, headers,
@@ -3693,10 +3784,15 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 # FD-recycle corruption vector. Nothing further is needed.
                 pass
             else:
-                try:
-                    agent._replace_primary_openai_client(reason="stale_stream_pool_cleanup")
-                except Exception:
-                    pass
+                # #70773: same FD-recycle corruption vector as #67142.
+                # The shared OpenAI client's connection pool must NOT be
+                # closed from this watchdog/poll thread — worker threads
+                # from previous stale-killed attempts may still be
+                # unwinding their SSL BIOs.  The request-local client is
+                # already closed above via _close_request_client_once.
+                # The shared client will be replaced lazily by
+                # _ensure_primary_openai_client on the next request.
+                pass
             # Reset the timer so we don't kill repeatedly while
             # the inner thread processes the closure.
             last_chunk_time["t"] = time.time()

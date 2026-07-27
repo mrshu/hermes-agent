@@ -3,6 +3,7 @@ import { computed } from 'nanostores'
 import type { CSSProperties, ReactElement, PointerEvent as ReactPointerEvent } from 'react'
 
 import { PREVIEW_RAIL_MAX_WIDTH, PREVIEW_RAIL_MIN_WIDTH } from '@/app/chat/right-rail'
+import { SessionStatusDot } from '@/app/chat/session-status-dot'
 import { PALETTE_AREA, type PaletteContribution } from '@/app/command-palette/contrib'
 import { type StatusbarItem } from '@/app/shell/statusbar-controls'
 import { IdleMount } from '@/components/idle-mount'
@@ -31,12 +32,14 @@ import {
 import { SidebarProvider } from '@/components/ui/sidebar'
 import { discoverBundledPlugins } from '@/contrib/plugins'
 import { Slot } from '@/contrib/react/slot'
+import { useContributions } from '@/contrib/react/use-contributions'
 import { registry } from '@/contrib/registry'
 import { discoverRuntimePlugins } from '@/contrib/runtime-loader'
 import { sessionTitle as storedSessionTitle } from '@/lib/chat-runtime'
 import { LayoutDashboard } from '@/lib/icons'
 import { type KeybindContribution, KEYBINDS_AREA } from '@/lib/keybinds/actions'
 import { Codecs, persistentAtom } from '@/lib/persisted'
+import { $artifactTabs } from '@/store/artifacts'
 import {
   $fileBrowserOpen,
   $panesFlipped,
@@ -49,10 +52,10 @@ import {
   SIDEBAR_DEFAULT_WIDTH,
   SIDEBAR_MAX_WIDTH
 } from '@/store/layout'
-import { $filePreviewTarget, $previewTarget, closeRightRail } from '@/store/preview'
+import { $filePreviewTabs, $filePreviewTarget, $previewTarget, closeRightRail } from '@/store/preview'
 import { $reviewOpen, closeReview, REVIEW_PANE_ID } from '@/store/review'
 import { $currentCwd, $selectedStoredSessionId, $sessions, sessionMatchesStoredId } from '@/store/session'
-import { $sessionColorById, sessionColorFor } from '@/store/session-color'
+import { watchSessionPins } from '@/store/session-pin-sync'
 
 import type { SessionDragPayload } from '../chat/composer/inline-refs'
 import { watchRouteTiles } from '../chat/route-tile'
@@ -396,6 +399,10 @@ watchContributedPanes()
 watchSessionTiles()
 watchRouteTiles()
 
+// Mirror sidebar pins into the backend keep-flag so the auto-archive sweep
+// never hides a pinned chat (and pre-existing pins migrate transparently).
+watchSessionPins()
+
 // The main tab reads as its SESSION (the loaded title, "New session" on a
 // fresh draft) — a stack of main + tiles is then just a row of session names.
 // register() replaces same-id in place; the render fn is the shared constant
@@ -409,9 +416,10 @@ const syncWorkspaceTitle = () => {
     area: 'panes',
     title: stored ? storedSessionTitle(stored) : 'New session',
     data: {
-      // The tab's lead dot — same shared map the sidebar row reads, so the
-      // main tab and its sidebar row always show the same color.
-      accent: sessionColorFor(stored),
+      // The tab's status dot — the SAME primitive the sidebar row and session
+      // tiles render, so the main tab never disagrees with its sidebar row. No
+      // dot on a fresh draft (no session yet).
+      tabLead: selected ? () => <SessionStatusDot session={stored} storedSessionId={selected} /> : undefined,
       // Pages aren't tab-able: the main zone's bar stands down while one shows.
       headerVeto: $workspaceIsPage.get(),
       placement: 'main',
@@ -426,7 +434,6 @@ const syncWorkspaceTitle = () => {
 
 $selectedStoredSessionId.listen(syncWorkspaceTitle)
 $sessions.listen(syncWorkspaceTitle)
-$sessionColorById.listen(syncWorkspaceTitle)
 $workspaceIsPage.listen(syncWorkspaceTitle)
 
 // Layout reset collapses every session tile into main as a tab (after the
@@ -546,9 +553,10 @@ bindPaneCollapse(
 // Preview EXISTS only while something is previewed (old-shell semantics:
 // closing the last preview tab closes the pane; a new target opens + fronts
 // it). Same visibility binding as every other self-managed surface, driven
-// by the live targets instead of a toggle.
-const $previewVisible = computed([$previewTarget, $filePreviewTarget], (target, fileTarget) =>
-  Boolean(target || fileTarget)
+// by the live targets (and open artifact tabs) instead of a toggle.
+const $previewVisible = computed(
+  [$previewTarget, $filePreviewTabs, $artifactTabs],
+  (target, fileTabs, artifactTabs) => Boolean(target) || fileTabs.length > 0 || artifactTabs.length > 0
 )
 
 bindPaneVisibility('preview', $previewVisible, closeRightRail)
@@ -597,8 +605,39 @@ const revealPreview = () => {
 
 $previewTarget.listen(target => target && revealPreview())
 $filePreviewTarget.listen(target => target && revealPreview())
+// Artifact reveal keys on tab OPENS (length grows), not list identity — closing
+// one of two artifact tabs must not re-front the pane.
+let lastArtifactTabCount = $artifactTabs.get().length
+$artifactTabs.listen(tabs => {
+  const grew = tabs.length > lastArtifactTabCount
+  lastArtifactTabCount = tabs.length
+
+  if (grew) {
+    revealPreview()
+  }
+})
 
 // ---------------------------------------------------------------------------
+
+interface TitlebarSlotProps {
+  area: 'titleBar.center' | 'titleBar.left' | 'titleBar.right'
+  className: string
+  style?: CSSProperties
+}
+
+function TitlebarSlot({ area, className, style }: TitlebarSlotProps) {
+  const items = useContributions(area)
+
+  if (items.length === 0) {
+    return null
+  }
+
+  return (
+    <div className={className} style={style}>
+      <Slot area={area} />
+    </div>
+  )
+}
 
 export function ContribController() {
   const sidebarOpen = useStore($sidebarOpen)
@@ -641,26 +680,25 @@ export function ContribController() {
               aria-hidden="true"
               className="pointer-events-none absolute inset-y-0 left-[calc(var(--titlebar-controls-left,14px)+(var(--titlebar-control-size,1.25rem)*2)+0.75rem)] right-[calc(var(--titlebar-tools-right,0.75rem)+var(--titlebar-tools-width,5.5rem)+0.75rem)] [-webkit-app-region:drag]"
             />
-            <div
+            <TitlebarSlot
+              area="titleBar.left"
               className="pointer-events-auto absolute z-10 flex w-max items-center gap-2 [-webkit-app-region:no-drag]"
               style={{
                 left: 'max(calc(var(--workspace-left, 0px) + 0.5rem), calc(var(--titlebar-controls-left, 14px) + 2 * var(--titlebar-control-size, 1.25rem) + 1rem))'
               }}
-            >
-              <Slot area="titleBar.left" />
-            </div>
-            <div className="pointer-events-auto absolute left-1/2 top-1/2 z-10 flex w-max -translate-x-1/2 -translate-y-1/2 items-center gap-2 [-webkit-app-region:no-drag]">
-              <Slot area="titleBar.center" />
-            </div>
-            <div
+            />
+            <TitlebarSlot
+              area="titleBar.center"
+              className="pointer-events-auto absolute left-1/2 top-1/2 z-10 flex w-max -translate-x-1/2 -translate-y-1/2 items-center gap-2 [-webkit-app-region:no-drag]"
+            />
+            <TitlebarSlot
+              area="titleBar.right"
               className="pointer-events-auto absolute z-10 flex w-max items-center gap-2 [-webkit-app-region:no-drag]"
               style={{
                 right:
                   'max(calc(var(--workspace-right, 0px) + 0.5rem), calc(var(--titlebar-tools-right, 0.75rem) + 4 * (var(--titlebar-control-size, 1.25rem) + 0.25rem) + 0.5rem))'
               }}
-            >
-              <Slot area="titleBar.right" />
-            </div>
+            />
           </div>
 
           <LayoutTreeRoot />
