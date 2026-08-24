@@ -43,6 +43,8 @@ from gateway.platforms.base import (
     cache_image_from_url,
 )
 from gateway.platforms.helpers import redact_phone
+from gateway.platforms.media_cache import DEFAULT_EXT_TO_MIME, mime_for_ext
+from tools.audio_container import CONTAINER_TO_EXT, sniff_container
 from gateway.platforms.signal_format import markdown_to_signal
 from gateway.platforms.signal_rate_limit import (
     SIGNAL_BATCH_PACING_NOTICE_THRESHOLD,
@@ -99,18 +101,15 @@ def _guess_extension(data: bytes) -> str:
         return ".webp"
     if data[:4] == b"%PDF":
         return ".pdf"
-    if len(data) >= 8 and data[4:8] == b"ftyp":
-        return ".mp4"
-    if data[:4] == b"OggS":
-        return ".ogg"
-    if len(data) >= 2 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0:
-        # ``0xFF 0xFx`` is shared by MP3 and ADTS AAC. The discriminator
-        # is bits 3-1 of byte 1: ADTS has ``ID=0`` and ``layer=00`` (mask
-        # 0xF6, target 0xF0); MP3 has ``ID=1`` and ``layer`` in {01,10,11}
-        # (mask 0xF6, target in {0xF2, 0xF4, 0xF6}).
-        if (data[1] & 0xF6) == 0xF0:
-            return ".aac"
-        return ".mp3"
+    # Audio/AV containers: delegate to the shared central sniffer
+    # (tools/audio_container.py) — ONE module owns magic-byte container
+    # detection. It handles the brand/form-type disambiguations this
+    # function used to carry locally: RIFF/WAVE vs WEBP (WEBP is claimed
+    # above, before delegation), ftyp audio brands ("M4A ", "M4B ") vs
+    # video brands (isom/mp42/avc1/qt), and MP3 vs ADTS AAC sync words.
+    container = sniff_container(data)
+    if container is not None:
+        return CONTAINER_TO_EXT[container]
     if data[:2] == b"PK":
         return ".zip"
     return ".bin"
@@ -124,18 +123,17 @@ def _is_audio_ext(ext: str) -> bool:
     return ext.lower() in {".mp3", ".wav", ".ogg", ".m4a", ".aac"}
 
 
-_EXT_TO_MIME = {
-    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
-    ".gif": "image/gif", ".webp": "image/webp",
-    ".ogg": "audio/ogg", ".mp3": "audio/mpeg", ".wav": "audio/wav",
-    ".m4a": "audio/mp4", ".aac": "audio/aac",
-    ".mp4": "video/mp4", ".pdf": "application/pdf", ".zip": "application/zip",
-}
+# Historical Signal ext→mime table now lives in
+# gateway.platforms.media_cache.DEFAULT_EXT_TO_MIME (byte-identical);
+# kept as a module alias for backwards compatibility with any callers
+# that referenced the private name.
+_EXT_TO_MIME = DEFAULT_EXT_TO_MIME
 
 
 def _ext_to_mime(ext: str) -> str:
     """Map file extension to MIME type."""
-    return _EXT_TO_MIME.get(ext.lower(), "application/octet-stream")
+    # preserves historical signal mapping (shared table matches verbatim)
+    return mime_for_ext(ext, fallback="application/octet-stream")
 
 
 def _remux_aac_to_m4a(aac_data: bytes) -> Optional[Tuple[bytes, str]]:
@@ -252,6 +250,26 @@ def validate_signal_config(config: PlatformConfig) -> bool:
 # Signal Adapter
 # ---------------------------------------------------------------------------
 
+def _sig_secret(name: str, default: str = "") -> str:
+    """Resolve a per-profile ``SIGNAL_*`` setting honoring the active secret
+    scope (#93522).
+
+    Under ``gateway.multiplex_profiles`` every secondary profile is
+    constructed inside ``_profile_runtime_scope`` (``gateway/run.py``) and
+    its ``.env`` lives in that scope — raw ``os.getenv`` misses it and
+    leaks the default profile's values instead. The primary/active profile
+    is constructed without a scope and legitimately owns ``os.environ``
+    (same canonical shape as QQ's ``_resolve_qq_secret``).
+    """
+    from agent.secret_scope import UnscopedSecretError, get_secret
+
+    try:
+        val = get_secret(name, default)
+    except UnscopedSecretError:
+        val = os.getenv(name)
+    return val if val is not None else default
+
+
 class SignalAdapter(BasePlatformAdapter):
     """Signal messenger adapter using signal-cli HTTP daemon."""
 
@@ -270,7 +288,10 @@ class SignalAdapter(BasePlatformAdapter):
         self.ignore_stories = extra.get("ignore_stories", True)
 
         # Parse allowlists — group policy is derived from presence of group allowlist
-        group_allowed_str = os.getenv("SIGNAL_GROUP_ALLOWED_USERS", "")
+        # Scoped reads (#93522): allowlists are per-profile authorization
+        # config; raw os.getenv misses secondary profiles' .env values and
+        # leaks the default profile's list into them.
+        group_allowed_str = _sig_secret("SIGNAL_GROUP_ALLOWED_USERS", "")
         self.group_allow_from = set(_parse_comma_list(group_allowed_str))
 
         # Mention filter — only respond in groups when the bot account is @mentioned.
@@ -287,7 +308,7 @@ class SignalAdapter(BasePlatformAdapter):
         # every inbound DM from any contact gets a 👀 reaction).
         # "*" means all users allowed (open mode); empty means no restriction
         # recorded at adapter level (run.py still enforces auth separately).
-        dm_allowed_str = os.getenv("SIGNAL_ALLOWED_USERS", "*")
+        dm_allowed_str = _sig_secret("SIGNAL_ALLOWED_USERS", "*")
         self.dm_allow_from = set(_parse_comma_list(dm_allowed_str))
 
         # HTTP client

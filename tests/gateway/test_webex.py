@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from agent import secret_scope as ss
 from gateway.config import GatewayConfig, Platform, PlatformConfig, _apply_env_overrides
 
 
@@ -46,6 +47,86 @@ class TestWebexConfigLoading:
         assert webex_cfg.extra["secret"] == "super-secret"
         assert webex_cfg.home_channel.chat_id == "Y2lzY29zcGFyazovL3VzL1JPT00vabc"
         assert webex_cfg.home_channel.name == "Ops"
+
+    def test_apply_env_overrides_webex_reads_active_secret_scope(self, monkeypatch):
+        process_values = {
+            "WEBEX_BOT_TOKEN": "process-token",
+            "WEBEX_CONNECTION_MODE": "websocket",
+            "WEBEX_WEBHOOK_PUBLIC_URL": "https://process.example.com",
+            "WEBEX_WEBHOOK_HOST": "process-host",
+            "WEBEX_WEBHOOK_PORT": "9000",
+            "WEBEX_WEBHOOK_PATH": "/process-webhook",
+            "WEBEX_WEBHOOK_SECRET": "process-secret",
+            "WEBEX_HOME_CHANNEL": "process-room",
+            "WEBEX_HOME_CHANNEL_NAME": "Process Home",
+        }
+        for name, value in process_values.items():
+            monkeypatch.setenv(name, value)
+
+        token = ss.set_secret_scope(
+            {
+                "WEBEX_BOT_TOKEN": "profile-token",
+                "WEBEX_CONNECTION_MODE": "webhook",
+                "WEBEX_WEBHOOK_PUBLIC_URL": "https://profile.example.com",
+                "WEBEX_WEBHOOK_HOST": "profile-host",
+                "WEBEX_WEBHOOK_PORT": "9443",
+                "WEBEX_WEBHOOK_PATH": "/profile-webhook",
+                "WEBEX_WEBHOOK_SECRET": "profile-secret",
+                "WEBEX_HOME_CHANNEL": "profile-room",
+                "WEBEX_HOME_CHANNEL_NAME": "Profile Home",
+            }
+        )
+        try:
+            config = GatewayConfig()
+            _apply_env_overrides(config)
+        finally:
+            ss.reset_secret_scope(token)
+
+        webex_cfg = config.platforms[Platform.WEBEX]
+        assert webex_cfg.enabled is True
+        assert webex_cfg.token == "profile-token"
+        expected_extra = {
+            "connection_mode": "webhook",
+            "public_url": "https://profile.example.com",
+            "host": "profile-host",
+            "port": 9443,
+            "path": "/profile-webhook",
+            "secret": "profile-secret",
+        }
+        for name, value in expected_extra.items():
+            assert webex_cfg.extra[name] == value
+        assert webex_cfg.home_channel.chat_id == "profile-room"
+        assert webex_cfg.home_channel.name == "Profile Home"
+
+    def test_explicit_enabled_false_wins_over_env_token_and_keeps_home(
+        self, monkeypatch, tmp_path
+    ):
+        from gateway.config import load_gateway_config
+
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text(
+            "platforms:\n"
+            "  webex:\n"
+            "    enabled: false\n"
+            "    extra:\n"
+            "      connection_mode: websocket\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("WEBEX_BOT_TOKEN", "webex-token")
+        monkeypatch.setenv("WEBEX_HOME_CHANNEL", "configured-room")
+        monkeypatch.setenv("WEBEX_HOME_CHANNEL_NAME", "Configured Home")
+
+        config = load_gateway_config()
+
+        webex_cfg = config.platforms[Platform.WEBEX]
+        assert webex_cfg.enabled is False
+        assert webex_cfg.token == "webex-token"
+        assert webex_cfg.extra["connection_mode"] == "websocket"
+        assert "_enabled_explicit" not in webex_cfg.extra
+        assert webex_cfg.home_channel.chat_id == "configured-room"
+        assert webex_cfg.home_channel.name == "Configured Home"
 
     def test_connected_platforms_defaults_to_websocket(self):
         config = GatewayConfig(

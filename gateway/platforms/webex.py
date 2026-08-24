@@ -53,7 +53,9 @@ from gateway.platforms.base import (
     cache_audio_from_bytes,
     cache_document_from_bytes,
     cache_image_from_bytes,
+    get_inbound_media_max_bytes,
     safe_url_for_log,
+    validate_inbound_media_size,
 )
 from gateway.platforms.helpers import MessageDeduplicator
 from hermes_cli.commands import resolve_command
@@ -71,6 +73,26 @@ ROOM_CACHE_TTL_SECONDS = 300
 THREAD_CONTEXT_CACHE_TTL_SECONDS = 60.0
 THREAD_CONTEXT_DEFAULT_LIMIT = 30
 THREAD_CONTEXT_MAX_CHARS = 6000
+ATTACHMENT_READ_CHUNK_SIZE = 64 * 1024
+
+
+class _WebexAPIRequestError(RuntimeError):
+    """Webex REST request failure whose HTTP status is safe to classify."""
+
+    def __init__(self, path: str, status: Optional[int] = None):
+        self.path = path
+        self.status = status
+        detail = f"HTTP {status}" if status is not None else "transport error"
+        super().__init__(f"Webex API {path} failed ({detail})")
+
+
+class _WebexStartupError(RuntimeError):
+    """Typed startup failure consumed by the gateway fatal-error contract."""
+
+    def __init__(self, code: str, message: str, *, retryable: bool):
+        self.code = code
+        self.retryable = retryable
+        super().__init__(message)
 
 
 @dataclass
@@ -132,26 +154,42 @@ class WebexAdapter(BasePlatformAdapter):
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         if not AIOHTTP_AVAILABLE:
-            logger.error("[Webex] aiohttp is not installed. Run: pip install aiohttp")
-            return False
-        if not self._token:
-            logger.error("[Webex] WEBEX_BOT_TOKEN is not configured")
-            return False
-        if self._connection_mode not in {"websocket", "webhook"}:
-            logger.error(
-                "[Webex] Unsupported WEBEX_CONNECTION_MODE=%s. Supported modes: websocket, webhook.",
-                self._connection_mode,
+            return self._fail_startup(
+                "webex_missing_dependency",
+                "aiohttp is not installed. Reinstall Hermes with gateway dependencies.",
+                retryable=False,
             )
-            return False
+        if not self._token:
+            return self._fail_startup(
+                "webex_missing_token",
+                "WEBEX_BOT_TOKEN is not configured.",
+                retryable=False,
+            )
+        if self._connection_mode not in {"websocket", "webhook"}:
+            return self._fail_startup(
+                "webex_invalid_config",
+                f"Unsupported WEBEX_CONNECTION_MODE={self._connection_mode!r}; "
+                "supported modes are websocket and webhook.",
+                retryable=False,
+            )
         if self._connection_mode == "webhook" and not self._public_url:
-            logger.error("[Webex] WEBEX_WEBHOOK_PUBLIC_URL is not configured for webhook mode")
-            return False
+            return self._fail_startup(
+                "webex_invalid_config",
+                "WEBEX_WEBHOOK_PUBLIC_URL is not configured for webhook mode.",
+                retryable=False,
+            )
         if self._connection_mode == "webhook" and not self._public_url.startswith("https://"):
-            logger.error("[Webex] WEBEX_WEBHOOK_PUBLIC_URL must be an HTTPS URL")
-            return False
+            return self._fail_startup(
+                "webex_invalid_config",
+                "WEBEX_WEBHOOK_PUBLIC_URL must be an HTTPS URL.",
+                retryable=False,
+            )
         if self._connection_mode == "webhook" and not self._path.startswith("/"):
-            logger.error("[Webex] Invalid webhook path %r", self._path)
-            return False
+            return self._fail_startup(
+                "webex_invalid_config",
+                f"Invalid Webex webhook path {self._path!r}.",
+                retryable=False,
+            )
         if not self._acquire_platform_lock("webex-bot-token", self._token, "Webex bot token"):
             return False
 
@@ -160,9 +198,12 @@ class WebexAdapter(BasePlatformAdapter):
                 with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as sock:
                     sock.settimeout(1)
                     sock.connect(("127.0.0.1", self._port))
-                logger.error("[Webex] Port %d already in use", self._port)
                 self._release_platform_lock()
-                return False
+                return self._fail_startup(
+                    "webex_port_in_use",
+                    f"Webhook port {self._port} is already in use.",
+                    retryable=True,
+                )
             except (ConnectionRefusedError, OSError):
                 pass
 
@@ -201,11 +242,40 @@ class WebexAdapter(BasePlatformAdapter):
             else:
                 logger.info("[Webex] Connected in websocket mode via local SDK listener")
             return True
-        except Exception:
+        except _WebexAPIRequestError as exc:
+            is_auth_error = exc.status in {401, 403}
+            code = "webex_auth_error" if is_auth_error else "webex_api_unavailable"
+            message = (
+                f"Webex bot authentication failed (HTTP {exc.status})."
+                if is_auth_error
+                else "Webex API was unavailable during startup; the gateway will retry."
+            )
             logger.exception("[Webex] Failed to start")
+            self._set_fatal_error(code, message, retryable=not is_auth_error)
             await self._cleanup()
             self._release_platform_lock()
             return False
+        except _WebexStartupError as exc:
+            logger.error("[Webex] Failed to start: %s", exc)
+            self._set_fatal_error(exc.code, str(exc), retryable=exc.retryable)
+            await self._cleanup()
+            self._release_platform_lock()
+            return False
+        except Exception:
+            logger.exception("[Webex] Failed to start")
+            self._set_fatal_error(
+                "webex_startup_failed",
+                "Webex startup failed; the gateway will retry.",
+                retryable=True,
+            )
+            await self._cleanup()
+            self._release_platform_lock()
+            return False
+
+    def _fail_startup(self, code: str, message: str, *, retryable: bool) -> bool:
+        logger.error("[Webex] %s", message)
+        self._set_fatal_error(code, message, retryable=retryable)
+        return False
 
     async def disconnect(self) -> None:
         self._running = False
@@ -263,6 +333,8 @@ class WebexAdapter(BasePlatformAdapter):
         chat_id: str,
         message_id: str,
         content: str,
+        *,
+        finalize: bool = False,
     ) -> SendResult:
         message = self.format_message(content).strip()
         if not message:
@@ -401,7 +473,11 @@ class WebexAdapter(BasePlatformAdapter):
     async def _start_websocket_listener(self) -> None:
         script_path = Path(__file__).with_name("webex_listener.js")
         if not script_path.exists():
-            raise RuntimeError(f"Missing Webex listener script: {script_path}")
+            raise _WebexStartupError(
+                "webex_missing_dependency",
+                f"Missing Webex listener script: {script_path}",
+                retryable=False,
+            )
 
         env = os.environ.copy()
         env["WEBEX_BOT_TOKEN"] = self._token
@@ -416,7 +492,11 @@ class WebexAdapter(BasePlatformAdapter):
                 env=env,
             )
         except FileNotFoundError as exc:
-            raise RuntimeError("Node.js is required for Webex websocket mode") from exc
+            raise _WebexStartupError(
+                "webex_missing_dependency",
+                "Node.js is required for Webex websocket mode.",
+                retryable=False,
+            ) from exc
         self._listener_process = process
         self._listener_ready = asyncio.get_running_loop().create_future()
         self._listener_stdout_task = asyncio.create_task(self._listener_stdout_loop(process))
@@ -522,11 +602,16 @@ class WebexAdapter(BasePlatformAdapter):
 
         if msg_type == "fatal":
             message = str(payload.get("message") or "Webex listener failed").strip()
+            failure = self._classify_listener_failure(message)
             if self._listener_ready and not self._listener_ready.done():
-                self._listener_ready.set_exception(RuntimeError(message))
+                self._listener_ready.set_exception(failure)
                 return
             if not self.has_fatal_error:
-                self._set_fatal_error("webex_listener_fatal", message, retryable=True)
+                self._set_fatal_error(
+                    failure.code,
+                    str(failure),
+                    retryable=failure.retryable,
+                )
                 await self._notify_fatal_error()
             logger.error("[Webex] %s", message)
             return
@@ -543,6 +628,26 @@ class WebexAdapter(BasePlatformAdapter):
             self._message_queue.put_nowait(event)
         except asyncio.QueueFull:
             logger.warning("[Webex] Dropping websocket event because the queue is full")
+
+    @staticmethod
+    def _classify_listener_failure(message: str) -> _WebexStartupError:
+        normalized = message.lower()
+        if (
+            "webex js sdk packages are not installed" in normalized
+            or "webex_bot_token is required" in normalized
+        ):
+            code = (
+                "webex_missing_dependency"
+                if "sdk packages" in normalized
+                else "webex_missing_token"
+            )
+            return _WebexStartupError(code, message, retryable=False)
+        if (
+            re.search(r"\b(?:401|403)\b", normalized)
+            and ("unauthorized" in normalized or "forbidden" in normalized)
+        ):
+            return _WebexStartupError("webex_auth_error", message, retryable=False)
+        return _WebexStartupError("webex_listener_fatal", message, retryable=True)
 
     async def _handle_health(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok", "platform": "webex"})
@@ -689,7 +794,7 @@ class WebexAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
 
     async def _load_bot_identity(self) -> None:
-        me = await self._api_get_json("people/me")
+        me = await self._api_get_json("people/me", raise_on_error=True)
         if not me or not me.get("id"):
             raise RuntimeError("Failed to load Webex bot identity from /people/me")
         self._bot_id = str(me.get("id") or "")
@@ -717,8 +822,12 @@ class WebexAdapter(BasePlatformAdapter):
         self,
         path: str,
         params: Optional[Dict[str, Any]] = None,
+        *,
+        raise_on_error: bool = False,
     ) -> Dict[str, Any]:
         if not self._session:
+            if raise_on_error:
+                raise _WebexAPIRequestError(path)
             return {}
         url = f"{API_BASE}/{path.lstrip('/')}"
         try:
@@ -726,10 +835,16 @@ class WebexAdapter(BasePlatformAdapter):
                 text = await resp.text()
                 if resp.status >= 400:
                     logger.warning("[Webex] GET %s -> %s: %s", path, resp.status, text[:300])
+                    if raise_on_error:
+                        raise _WebexAPIRequestError(path, resp.status)
                     return {}
                 return json.loads(text) if text else {}
+        except _WebexAPIRequestError:
+            raise
         except Exception as exc:
             logger.warning("[Webex] GET %s failed: %s", path, exc)
+            if raise_on_error:
+                raise _WebexAPIRequestError(path) from exc
             return {}
 
     async def _api_post_json(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1233,15 +1348,57 @@ class WebexAdapter(BasePlatformAdapter):
         async with self._session.get(file_url, headers=self._headers()) as resp:
             if resp.status >= 400:
                 raise RuntimeError(f"HTTP {resp.status}")
-            data = await resp.read()
             mime = (resp.headers.get("Content-Type") or "application/octet-stream").split(";", 1)[0]
             filename = self._attachment_filename(file_url, resp.headers)
             ext = Path(filename).suffix or mimetypes.guess_extension(mime) or ".bin"
+            media_type = (
+                "image"
+                if mime.startswith("image/")
+                else "audio"
+                if mime.startswith("audio/")
+                else "document"
+            )
+            data = await self._read_attachment_body(resp, media_type=media_type)
             if mime.startswith("image/"):
                 return cache_image_from_bytes(data, ext), mime
             if mime.startswith("audio/"):
                 return cache_audio_from_bytes(data, ext), mime
             return cache_document_from_bytes(data, filename), mime
+
+    @staticmethod
+    async def _read_attachment_body(resp: Any, *, media_type: str) -> bytes:
+        """Read an aiohttp body while enforcing the shared inbound-media cap."""
+        max_bytes = get_inbound_media_max_bytes()
+        content_length = (
+            resp.headers.get("Content-Length")
+            or resp.headers.get("content-length")
+        )
+        if content_length:
+            try:
+                declared_size = int(content_length)
+            except (TypeError, ValueError):
+                logger.debug(
+                    "[Webex] Ignoring invalid attachment Content-Length: %r",
+                    content_length,
+                )
+            else:
+                validate_inbound_media_size(
+                    declared_size,
+                    media_type=media_type,
+                    max_bytes=max_bytes,
+                )
+
+        chunks: List[bytes] = []
+        total = 0
+        async for chunk in resp.content.iter_chunked(ATTACHMENT_READ_CHUNK_SIZE):
+            total += len(chunk)
+            validate_inbound_media_size(
+                total,
+                media_type=media_type,
+                max_bytes=max_bytes,
+            )
+            chunks.append(chunk)
+        return b"".join(chunks)
 
     @staticmethod
     def _attachment_filename(file_url: str, headers: Any) -> str:
