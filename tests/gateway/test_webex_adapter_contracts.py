@@ -1,5 +1,6 @@
 """Current base-adapter contracts exercised by the Webex adapter."""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -90,7 +91,7 @@ class TestWebexAttachmentBounds:
     async def test_document_rejects_oversized_content_length_before_reading(
         self, monkeypatch
     ):
-        import gateway.platforms.webex as webex
+        from gateway.platforms import webex
 
         response = _Response(
             headers={
@@ -117,7 +118,7 @@ class TestWebexAttachmentBounds:
     async def test_document_stops_when_stream_exceeds_declared_and_actual_limit(
         self, monkeypatch
     ):
-        import gateway.platforms.webex as webex
+        from gateway.platforms import webex
 
         response = _Response(
             headers={
@@ -142,7 +143,7 @@ class TestWebexAttachmentBounds:
 
     @pytest.mark.asyncio
     async def test_document_stream_within_limit_reaches_document_cache(self, monkeypatch):
-        import gateway.platforms.webex as webex
+        from gateway.platforms import webex
 
         response = _Response(
             headers={
@@ -179,7 +180,7 @@ class TestWebexStartupClassification:
 
     @pytest.mark.asyncio
     async def test_explicit_auth_status_is_nonretryable(self, monkeypatch):
-        import gateway.platforms.webex as webex
+        from gateway.platforms import webex
 
         session = _Session(
             _Response(headers={}, chunks=[], status=401, text="unauthorized"),
@@ -200,7 +201,7 @@ class TestWebexStartupClassification:
 
     @pytest.mark.asyncio
     async def test_transport_failure_remains_retryable(self, monkeypatch):
-        import gateway.platforms.webex as webex
+        from gateway.platforms import webex
 
         session = _Session(
             _Response(headers={}, chunks=[], status=503, text="unavailable"),
@@ -233,3 +234,64 @@ class TestWebexStartupClassification:
         assert missing_sdk.retryable is False
         assert ambiguous_crash.code == "webex_listener_fatal"
         assert ambiguous_crash.retryable is True
+
+
+def test_webex_adapter_uses_profile_secrets_without_process_fallback(monkeypatch):
+    from agent import secret_scope
+
+    monkeypatch.setenv("WEBEX_BOT_TOKEN", "process-token")
+    monkeypatch.setenv("WEBEX_WEBHOOK_PUBLIC_URL", "https://process.example.com")
+    monkeypatch.setenv("WEBEX_WEBHOOK_SECRET", "process-secret")
+    context = secret_scope.set_multiplex_context(True)
+    scope = secret_scope.set_secret_scope({"WEBEX_BOT_TOKEN": "profile-token"})
+    try:
+        adapter = _make_adapter(token="")
+    finally:
+        secret_scope.reset_secret_scope(scope)
+        secret_scope.reset_multiplex_context(context)
+
+    assert adapter._token == "profile-token"
+    assert adapter._public_url == ""
+    assert adapter._secret == ""
+
+
+def test_webex_thread_history_uses_profile_session_key(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from gateway.config import GatewayConfig
+    from gateway.session import SessionStore
+
+    hermes_home = tmp_path / ".hermes"
+    (hermes_home / "profiles" / "secondary").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    adapter = _make_adapter()
+    store = SessionStore(hermes_home / "sessions", GatewayConfig(multiplex_profiles=True))
+    adapter.set_session_store(store)
+    secondary_source = adapter.build_source(
+        chat_id="room-1", chat_type="group", user_id="alice@example.com", thread_id="parent-1",
+    )
+    secondary_source.profile = "secondary"
+    default_source = adapter.build_source(
+        chat_id="room-1", chat_type="group", user_id="alice@example.com", thread_id="parent-1",
+    )
+    try:
+        store.get_or_create_session(secondary_source)
+        assert adapter._has_active_session_for_thread(source=secondary_source) is True
+        assert adapter._has_active_session_for_thread(source=default_source) is False
+    finally:
+        store.close_all_db_handles()
+
+
+@pytest.mark.asyncio
+async def test_webex_listener_monitor_survives_wait_timeout_until_exit():
+    adapter = _make_adapter()
+    adapter._running = True
+    adapter._notify_fatal_error = AsyncMock()
+    process = SimpleNamespace(wait=AsyncMock(side_effect=[TimeoutError, 0]))
+
+    await adapter._listener_exit_loop(process)
+
+    assert process.wait.await_count == 2
+    assert adapter.fatal_error_code == "webex_listener_exited"
+    adapter._notify_fatal_error.assert_awaited_once()

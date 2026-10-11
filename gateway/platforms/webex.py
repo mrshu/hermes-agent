@@ -24,13 +24,12 @@ import hmac
 import json
 import logging
 import mimetypes
-import os
 import re
 import socket as _socket
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 from urllib.parse import urlsplit
 
 try:
@@ -45,10 +44,9 @@ except ImportError:
     AIOHTTP_AVAILABLE = False
 
 from gateway.config import Platform, PlatformConfig
+from gateway.platforms._shared import get_scoped_secret as _get_scoped_secret
 from gateway.platforms.base import (
     BasePlatformAdapter,
-    MessageEvent,
-    MessageType,
     SendResult,
     cache_audio_from_bytes,
     cache_document_from_bytes,
@@ -57,7 +55,9 @@ from gateway.platforms.base import (
     safe_url_for_log,
     validate_inbound_media_size,
 )
+from gateway.platforms.event import MessageEvent, MessageType
 from gateway.platforms.helpers import MessageDeduplicator
+from gateway.session import SessionSource
 from hermes_cli.commands import resolve_command
 
 logger = logging.getLogger(__name__)
@@ -117,15 +117,15 @@ class WebexAdapter(BasePlatformAdapter):
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.WEBEX)
         extra = config.extra or {}
-        self._token: str = config.token or os.getenv("WEBEX_BOT_TOKEN", "")
+        self._token: str = config.token or _get_scoped_secret("WEBEX_BOT_TOKEN", "")
         self._connection_mode: str = str(
-            extra.get("connection_mode") or os.getenv("WEBEX_CONNECTION_MODE", DEFAULT_CONNECTION_MODE)
+            extra.get("connection_mode") or _get_scoped_secret("WEBEX_CONNECTION_MODE", DEFAULT_CONNECTION_MODE)
         ).strip().lower() or DEFAULT_CONNECTION_MODE
         self._host: str = str(extra.get("host") or DEFAULT_HOST)
         self._port: int = int(extra.get("port") or DEFAULT_PORT)
         self._path: str = self._normalize_path(str(extra.get("path") or DEFAULT_PATH))
-        self._public_url: str = str(extra.get("public_url") or os.getenv("WEBEX_WEBHOOK_PUBLIC_URL", "")).rstrip("/")
-        self._secret: str = str(extra.get("secret") or os.getenv("WEBEX_WEBHOOK_SECRET", ""))
+        self._public_url: str = str(extra.get("public_url") or _get_scoped_secret("WEBEX_WEBHOOK_PUBLIC_URL", "")).rstrip("/")
+        self._secret: str = str(extra.get("secret") or _get_scoped_secret("WEBEX_WEBHOOK_SECRET", ""))
         self._require_mention: bool = extra.get("require_mention", True)
         self._webhook_prefix: str = str(extra.get("webhook_prefix") or DEFAULT_WEBHOOK_PREFIX)
 
@@ -144,9 +144,9 @@ class WebexAdapter(BasePlatformAdapter):
         self._bot_id: str = ""
         self._bot_email: str = ""
         self._bot_display_name: str = ""
-        self._room_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
-        self._thread_context_cache: Dict[str, _WebexThreadContextCache] = {}
-        self._managed_webhook_ids: List[str] = []
+        self._room_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._thread_context_cache: dict[str, _WebexThreadContextCache] = {}
+        self._managed_webhook_ids: list[str] = []
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -311,7 +311,7 @@ class WebexAdapter(BasePlatformAdapter):
         chat_id: str,
         content: str,
         reply_to: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> SendResult:
         message = self.format_message(content).strip()
         if not message:
@@ -363,7 +363,7 @@ class WebexAdapter(BasePlatformAdapter):
         image_url: str,
         caption: Optional[str] = None,
         reply_to: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> SendResult:
         payload = self._build_text_payload(chat_id, caption or "", metadata=metadata)
         if payload is None:
@@ -382,7 +382,7 @@ class WebexAdapter(BasePlatformAdapter):
         image_path: str,
         caption: Optional[str] = None,
         reply_to: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> SendResult:
         return await self._send_local_file(chat_id, image_path, caption=caption, metadata=metadata)
 
@@ -393,7 +393,7 @@ class WebexAdapter(BasePlatformAdapter):
         caption: Optional[str] = None,
         file_name: Optional[str] = None,
         reply_to: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> SendResult:
         return await self._send_local_file(
             chat_id,
@@ -409,7 +409,7 @@ class WebexAdapter(BasePlatformAdapter):
         audio_path: str,
         caption: Optional[str] = None,
         reply_to: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> SendResult:
         return await self._send_local_file(chat_id, audio_path, caption=caption, metadata=metadata)
 
@@ -419,7 +419,7 @@ class WebexAdapter(BasePlatformAdapter):
         video_path: str,
         caption: Optional[str] = None,
         reply_to: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> SendResult:
         return await self._send_local_file(chat_id, video_path, caption=caption, metadata=metadata)
 
@@ -429,11 +429,11 @@ class WebexAdapter(BasePlatformAdapter):
         file_path: str,
         *,
         caption: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: Optional[dict[str, Any]] = None,
         file_name: Optional[str] = None,
     ) -> SendResult:
         path = Path(file_path)
-        if not path.exists():
+        if not await asyncio.to_thread(path.exists):
             return SendResult(success=False, error=f"File not found: {file_path}")
 
         form = FormData()
@@ -447,7 +447,7 @@ class WebexAdapter(BasePlatformAdapter):
         content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         form.add_field(
             "files",
-            path.read_bytes(),
+            await asyncio.to_thread(path.read_bytes),
             filename=file_name or path.name,
             content_type=content_type,
         )
@@ -457,7 +457,7 @@ class WebexAdapter(BasePlatformAdapter):
             return SendResult(success=True, message_id=str(data["id"]), raw_response=data)
         return SendResult(success=False, error=json.dumps(data or {"error": "upload failed"}))
 
-    async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
+    async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         room = await self._get_room(chat_id)
         room_type = room.get("type", "group")
         return {
@@ -479,7 +479,8 @@ class WebexAdapter(BasePlatformAdapter):
                 retryable=False,
             )
 
-        env = os.environ.copy()
+        from tools.environments.local import served_profile_child_env
+        env = served_profile_child_env()
         env["WEBEX_BOT_TOKEN"] = self._token
         try:
             process = await asyncio.create_subprocess_exec(
@@ -514,7 +515,7 @@ class WebexAdapter(BasePlatformAdapter):
             process.terminate()
             try:
                 await asyncio.wait_for(process.wait(), timeout=5)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 process.kill()
                 await process.wait()
 
@@ -566,7 +567,13 @@ class WebexAdapter(BasePlatformAdapter):
                 logger.warning("[Webex] Listener stderr: %s", raw)
 
     async def _listener_exit_loop(self, process: asyncio.subprocess.Process) -> None:
-        returncode = await process.wait()
+        # The SDK listener runs for the gateway's lifetime; expiry only renews the monitor.
+        while True:
+            try:
+                returncode = await asyncio.wait_for(process.wait(), timeout=30)
+                break
+            except TimeoutError:
+                continue
         if self._listener_ready and not self._listener_ready.done():
             self._listener_ready.set_exception(
                 RuntimeError(f"Webex listener exited before startup completed (code {returncode})")
@@ -580,7 +587,7 @@ class WebexAdapter(BasePlatformAdapter):
             self._set_fatal_error("webex_listener_exited", message, retryable=True)
             await self._notify_fatal_error()
 
-    async def _handle_listener_message(self, payload: Dict[str, Any]) -> None:
+    async def _handle_listener_message(self, payload: dict[str, Any]) -> None:
         msg_type = str(payload.get("type") or "").strip().lower()
         if msg_type == "ready":
             if self._listener_ready and not self._listener_ready.done():
@@ -685,7 +692,7 @@ class WebexAdapter(BasePlatformAdapter):
             except Exception:
                 logger.exception("[Webex] Failed to process inbound payload")
 
-    async def _build_event(self, payload: Dict[str, Any]) -> Optional[MessageEvent]:
+    async def _build_event(self, payload: dict[str, Any]) -> Optional[MessageEvent]:
         data = payload.get("data") or {}
         message_id = str(data.get("id") or "")
         if not message_id:
@@ -746,11 +753,7 @@ class WebexAdapter(BasePlatformAdapter):
         reply_to_text = None
         if parent_id:
             if msg_type != MessageType.COMMAND and not self._has_active_session_for_thread(
-                room_id=room_id,
-                chat_type=chat_type,
-                parent_id=parent_id,
-                user_id=sender_email or sender_person_id,
-                user_id_alt=sender_person_id or None,
+                source=source,
             ):
                 thread_context = await self._fetch_thread_context(
                     room_id=room_id,
@@ -774,7 +777,7 @@ class WebexAdapter(BasePlatformAdapter):
         )
 
     @staticmethod
-    def _coerce_event_message(data: Any) -> Dict[str, Any]:
+    def _coerce_event_message(data: Any) -> dict[str, Any]:
         if not isinstance(data, dict):
             return {}
         if not data.get("id") or not data.get("roomId") or not data.get("personId"):
@@ -782,7 +785,7 @@ class WebexAdapter(BasePlatformAdapter):
         return dict(data)
 
     @staticmethod
-    def _needs_full_message_fetch(message: Dict[str, Any]) -> bool:
+    def _needs_full_message_fetch(message: dict[str, Any]) -> bool:
         return not bool(
             message.get("text")
             or message.get("markdown")
@@ -802,7 +805,7 @@ class WebexAdapter(BasePlatformAdapter):
         self._bot_email = str(emails[0]) if emails else ""
         self._bot_display_name = str(me.get("displayName") or self._bot_email or self._bot_id)
 
-    async def _get_room(self, room_id: str) -> Dict[str, Any]:
+    async def _get_room(self, room_id: str) -> dict[str, Any]:
         cached = self._room_cache.get(room_id)
         now = time.time()
         if cached and cached[0] > now:
@@ -821,10 +824,10 @@ class WebexAdapter(BasePlatformAdapter):
     async def _api_get_json(
         self,
         path: str,
-        params: Optional[Dict[str, Any]] = None,
+        params: Optional[dict[str, Any]] = None,
         *,
         raise_on_error: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         if not self._session:
             if raise_on_error:
                 raise _WebexAPIRequestError(path)
@@ -842,12 +845,12 @@ class WebexAdapter(BasePlatformAdapter):
         except _WebexAPIRequestError:
             raise
         except Exception as exc:
-            logger.warning("[Webex] GET %s failed: %s", path, exc)
+            logger.warning("[Webex] GET %s failed: %s", path, exc, exc_info=True)
             if raise_on_error:
                 raise _WebexAPIRequestError(path) from exc
             return {}
 
-    async def _api_post_json(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def _api_post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         if not self._session:
             return {}
         url = f"{API_BASE}/{path.lstrip('/')}"
@@ -859,10 +862,10 @@ class WebexAdapter(BasePlatformAdapter):
                     return {}
                 return json.loads(text) if text else {}
         except Exception as exc:
-            logger.warning("[Webex] POST %s failed: %s", path, exc)
+            logger.warning("[Webex] POST %s failed: %s", path, exc, exc_info=True)
             return {}
 
-    async def _api_post_form(self, path: str, form: FormData) -> Dict[str, Any]:
+    async def _api_post_form(self, path: str, form: FormData) -> dict[str, Any]:
         if not self._session:
             return {}
         url = f"{API_BASE}/{path.lstrip('/')}"
@@ -874,10 +877,10 @@ class WebexAdapter(BasePlatformAdapter):
                     return {}
                 return json.loads(text) if text else {}
         except Exception as exc:
-            logger.warning("[Webex] POST %s failed: %s", path, exc)
+            logger.warning("[Webex] POST %s failed: %s", path, exc, exc_info=True)
             return {}
 
-    async def _api_put_json(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def _api_put_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         if not self._session:
             return {}
         url = f"{API_BASE}/{path.lstrip('/')}"
@@ -889,7 +892,7 @@ class WebexAdapter(BasePlatformAdapter):
                     return {}
                 return json.loads(text) if text else {}
         except Exception as exc:
-            logger.warning("[Webex] PUT %s failed: %s", path, exc)
+            logger.warning("[Webex] PUT %s failed: %s", path, exc, exc_info=True)
             return {}
 
     async def _api_delete(self, path: str) -> bool:
@@ -904,16 +907,16 @@ class WebexAdapter(BasePlatformAdapter):
                     return False
                 return True
         except Exception as exc:
-            logger.warning("[Webex] DELETE %s failed: %s", path, exc)
+            logger.warning("[Webex] DELETE %s failed: %s", path, exc, exc_info=True)
             return False
 
-    def _headers(self) -> Dict[str, str]:
+    def _headers(self) -> dict[str, str]:
         return {
             "Authorization": f"Bearer {self._token}",
             "Accept": "application/json",
         }
 
-    def _json_headers(self) -> Dict[str, str]:
+    def _json_headers(self) -> dict[str, str]:
         headers = self._headers()
         headers["Content-Type"] = "application/json"
         return headers
@@ -949,7 +952,7 @@ class WebexAdapter(BasePlatformAdapter):
             }
         )
 
-        matched_ids: Dict[Tuple[str, str, str, str], str] = {}
+        matched_ids: dict[tuple[str, str, str, str], str] = {}
         desired_keys = {
             (spec["resource"], spec["event"], spec["filter"], self._target_url)
             for spec in desired
@@ -1032,7 +1035,7 @@ class WebexAdapter(BasePlatformAdapter):
         return False
 
     @staticmethod
-    def _parse_signature_header(value: str) -> List[Tuple[Optional[str], str]]:
+    def _parse_signature_header(value: str) -> list[tuple[Optional[str], str]]:
         parts = []
         for token in re.split(r"[,\s;]+", value):
             token = token.strip()
@@ -1061,12 +1064,12 @@ class WebexAdapter(BasePlatformAdapter):
         chat_id: str,
         content: str,
         *,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> Optional[Dict[str, Any]]:
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> Optional[dict[str, Any]]:
         chat_id = str(chat_id or "").strip()
         if not chat_id:
             return None
-        payload: Dict[str, Any] = {}
+        payload: dict[str, Any] = {}
         if "@" in chat_id and " " not in chat_id:
             payload["toPersonEmail"] = chat_id
         else:
@@ -1086,7 +1089,7 @@ class WebexAdapter(BasePlatformAdapter):
             form.add_field("roomId", chat_id)
 
     @staticmethod
-    def _extract_parent_id(metadata: Optional[Dict[str, Any]]) -> Optional[str]:
+    def _extract_parent_id(metadata: Optional[dict[str, Any]]) -> Optional[str]:
         if not metadata:
             return None
         parent_id = metadata.get("thread_id")
@@ -1130,7 +1133,7 @@ class WebexAdapter(BasePlatformAdapter):
         command = text.split(maxsplit=1)[0]
         return resolve_command(command) is not None
 
-    def _group_message_mentions_bot(self, message: Dict[str, Any]) -> bool:
+    def _group_message_mentions_bot(self, message: dict[str, Any]) -> bool:
         mentioned = message.get("mentionedPeople")
         if isinstance(mentioned, list):
             for candidate in mentioned:
@@ -1162,7 +1165,7 @@ class WebexAdapter(BasePlatformAdapter):
                     return True
         return False
 
-    def _detect_message_type(self, text: str, media_types: List[str]) -> MessageType:
+    def _detect_message_type(self, text: str, media_types: list[str]) -> MessageType:
         if text.startswith("/"):
             return MessageType.COMMAND
         if not media_types:
@@ -1182,11 +1185,7 @@ class WebexAdapter(BasePlatformAdapter):
     def _has_active_session_for_thread(
         self,
         *,
-        room_id: str,
-        chat_type: str,
-        parent_id: str,
-        user_id: str,
-        user_id_alt: Optional[str] = None,
+        source: SessionSource,
     ) -> bool:
         """Return True when Hermes already has a session for this Webex thread."""
 
@@ -1195,33 +1194,10 @@ class WebexAdapter(BasePlatformAdapter):
             return False
 
         try:
-            from gateway.session import SessionSource, build_session_key
-
-            source = SessionSource(
-                platform=Platform.WEBEX,
-                chat_id=room_id,
-                chat_type=chat_type,
-                user_id=user_id,
-                thread_id=parent_id,
-                user_id_alt=user_id_alt,
-            )
-            store_cfg = getattr(session_store, "config", None)
-            group_sessions_per_user = (
-                getattr(store_cfg, "group_sessions_per_user", True)
-                if store_cfg else True
-            )
-            thread_sessions_per_user = (
-                getattr(store_cfg, "thread_sessions_per_user", False)
-                if store_cfg else False
-            )
-            session_key = build_session_key(
-                source,
-                group_sessions_per_user=group_sessions_per_user,
-                thread_sessions_per_user=thread_sessions_per_user,
-            )
-            session_store._ensure_loaded()
-            return session_key in session_store._entries
+            session_key = self._source_session_key(source)
+            return session_store.lookup_by_session_key(session_key) is not None
         except Exception:
+            logger.exception("[Webex] Failed to look up the thread session")
             return False
 
     async def _fetch_thread_context(
@@ -1256,7 +1232,7 @@ class WebexAdapter(BasePlatformAdapter):
         if not isinstance(replies, list):
             replies = []
 
-        parts: List[str] = []
+        parts: list[str] = []
         parent_text = self._message_text(parent)
         parent_line = await self._format_thread_message(parent, is_parent=True)
         if parent_line:
@@ -1305,7 +1281,7 @@ class WebexAdapter(BasePlatformAdapter):
             return ""
         return self._message_text(parent)
 
-    async def _format_thread_message(self, message: Dict[str, Any], *, is_parent: bool) -> str:
+    async def _format_thread_message(self, message: dict[str, Any], *, is_parent: bool) -> str:
         text = self._message_text(message)
         if not text:
             return ""
@@ -1326,12 +1302,12 @@ class WebexAdapter(BasePlatformAdapter):
         return f"{prefix}{name}: {text}"
 
     @staticmethod
-    def _message_text(message: Dict[str, Any]) -> str:
+    def _message_text(message: dict[str, Any]) -> str:
         return str(message.get("text") or message.get("markdown") or "").strip()
 
-    async def _download_attachments(self, files: List[str]) -> Tuple[List[str], List[str]]:
-        media_urls: List[str] = []
-        media_types: List[str] = []
+    async def _download_attachments(self, files: list[str]) -> tuple[list[str], list[str]]:
+        media_urls: list[str] = []
+        media_types: list[str] = []
         for file_url in files:
             try:
                 local_path, mime = await self._download_attachment(file_url)
@@ -1339,10 +1315,10 @@ class WebexAdapter(BasePlatformAdapter):
                     media_urls.append(local_path)
                     media_types.append(mime)
             except Exception as exc:
-                logger.warning("[Webex] Failed to download attachment %s: %s", safe_url_for_log(file_url), exc)
+                logger.warning("[Webex] Failed to download attachment %s: %s", safe_url_for_log(file_url), exc, exc_info=True)
         return media_urls, media_types
 
-    async def _download_attachment(self, file_url: str) -> Tuple[str, str]:
+    async def _download_attachment(self, file_url: str) -> tuple[str, str]:
         if not self._session:
             raise RuntimeError("HTTP session is not available")
         async with self._session.get(file_url, headers=self._headers()) as resp:
@@ -1388,7 +1364,7 @@ class WebexAdapter(BasePlatformAdapter):
                     max_bytes=max_bytes,
                 )
 
-        chunks: List[bytes] = []
+        chunks: list[bytes] = []
         total = 0
         async for chunk in resp.content.iter_chunked(ATTACHMENT_READ_CHUNK_SIZE):
             total += len(chunk)

@@ -151,7 +151,7 @@ outlook attachments 7 --json
 Download all attachments:
 
 ```bash
-outlook attachments 7 --download --save-to /tmp/outlook-attachments
+outlook attachments 7 --download --save-to "$TMPDIR/outlook-attachments"
 ```
 
 When attaching outbound files, verify the paths exist first. Files under 3 MB are inlined by the CLI; larger files use an upload session.
@@ -340,9 +340,9 @@ Typical read commands emit an envelope like:
 Use Python or `jq` only if needed to reduce large results before returning them to the user. If output is large, save with `-o` where available:
 
 ```bash
-outlook inbox --json -o /tmp/outlook-inbox.json
-outlook search "quarterly" --json -o /tmp/outlook-search.json
-outlook calendar --days 30 --json -o /tmp/outlook-calendar.json
+outlook inbox --json -o "$TMPDIR/outlook-inbox.json"
+outlook search "quarterly" --json -o "$TMPDIR/outlook-search.json"
+outlook calendar --days 30 --json -o "$TMPDIR/outlook-calendar.json"
 ```
 
 ## One-Shot Recipes
@@ -377,7 +377,7 @@ outlook category-clear "Old Label" --folder Inbox -n 100
 ```bash
 outlook search "subject:invoice hasattachments:true" -n 10 --json
 outlook attachments 6 --json
-outlook attachments 6 --download --save-to /tmp/invoices
+outlook attachments 6 --download --save-to "$TMPDIR/invoices"
 ```
 
 ## Common Pitfalls
