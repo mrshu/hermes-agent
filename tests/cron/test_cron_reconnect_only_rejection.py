@@ -14,6 +14,7 @@ import threading
 import pytest
 
 import cron.scheduler_delivery as sd
+import cron.scheduler_delivery_senders as senders
 from gateway import delivery_ledger as dl
 from gateway.config import GatewayConfig, Platform
 from gateway.platforms.base import SendResult
@@ -53,7 +54,7 @@ def _deliver_through_router(monkeypatch, loop, *, live_error: str):
     t = sd._TargetDelivery(**fields)
     standalone_calls = []
     monkeypatch.setattr(
-        sd, "_standalone_send",
+        senders, "_standalone_send",
         lambda t, content, media: standalone_calls.append(content) or (None, "You must pass the token from BotFather"))
     target_errors, delivery_errors = [], []
     assert not sd._deliver_via_live_adapter(

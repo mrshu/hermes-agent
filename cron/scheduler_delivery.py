@@ -8,10 +8,7 @@ late-bound (``_sched`` / module refs at the bottom) so monkeypatching the defini
 
 from __future__ import annotations
 
-import asyncio
-import concurrent.futures
 import contextlib
-import contextvars
 import logging
 import os
 import shutil
@@ -1117,72 +1114,6 @@ def _resolve_delivery_target(job: dict) -> Optional[dict]:
     return targets[0] if targets else None
 
 
-# Audio routing is centralized in gateway.platforms.base.should_send_media_as_audio().
-_VIDEO_EXTS = frozenset({'.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp'})
-_IMAGE_EXTS = frozenset({'.jpg', '.jpeg', '.png', '.webp', '.gif'})
-
-
-def _send_media_via_adapter(
-    adapter, chat_id: str, media_files: list, metadata: dict | None, loop, job: dict, platform=None,
-) -> list:
-    """Send MEDIA files as native attachments (routed by extension, as in
-    _process_message_background). Returns per-file error strings so a dropped attachment surfaces
-    in run status, not just the gateway log."""
-    from gateway.platforms.base import (
-        BasePlatformAdapter, should_send_media_as_audio, validate_media_delivery_path)
-    from agent.async_utils import safe_schedule_threadsafe
-    job_ref = {"id": job.get("id", "?")}
-    errors: list = []
-    requested = [(str(p), v) for p, v in (media_files or [])]
-    media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
-    # Report paths the safety filter dropped (missing file, denied prefix, strict-mode miss).
-    kept = {p for p, _ in media_files}
-    for raw_path, _v in requested:
-        try:
-            dropped = validate_media_delivery_path(raw_path) not in kept
-        except Exception:
-            dropped = True
-        if dropped:
-            errors.append(f"attachment dropped by media path policy: {raw_path}")
-
-    route_platform = platform if platform is not None else getattr(adapter, "platform", None)
-    for media_path, _is_voice in media_files:
-        try:
-            ext = _sched.Path(media_path).suffix.lower()
-            if should_send_media_as_audio(route_platform, ext, is_voice=_is_voice):
-                method, path_kw = "send_voice", "audio_path"
-            elif ext in _VIDEO_EXTS:
-                method, path_kw = "send_video", "video_path"
-            elif ext in _IMAGE_EXTS:
-                method, path_kw = "send_image_file", "image_path"
-            else:
-                method, path_kw = "send_document", "file_path"
-            coro = getattr(adapter, method)(
-                chat_id=chat_id, metadata=metadata, **{path_kw: media_path})
-            future = safe_schedule_threadsafe(coro, loop)
-            if future is None:
-                _note_target_error(
-                    job_ref, f"cannot send media {media_path}: gateway loop unavailable", errors)
-                return errors
-            try:
-                # Large attachments can exceed 30s; configurable via _get_media_send_timeout().
-                result = future.result(timeout=_script._get_media_send_timeout())
-            except TimeoutError:
-                future.cancel()
-                raise
-            if result and not getattr(result, "success", True):
-                _note_target_error(
-                    job_ref,
-                    f"media send failed for {media_path}: {getattr(result, 'error', 'unknown')}",
-                    errors,
-                )
-        except Exception as e:
-            # TimeoutError etc. have an empty str(); fall back to the class name.
-            _note_target_error(
-                job_ref, f"failed to send media {media_path}: {str(e) or type(e).__name__}", errors)
-    return errors
-
-
 def _result_field(send_result, key: str, default=None):
     """Read ``key`` from a SendResult-like object or the plain dict the silence filter returns."""
     if isinstance(send_result, dict):
@@ -1563,6 +1494,7 @@ def _live_send_text(
         _warn_live_lane_failure(job, msg, t.is_relay)
         target_errors.append(msg)
         return False, False, None
+    _senders._resolve_live_webex_destination(t, send_raw_response)
     if send_raw_response and t.thread_id and send_raw_response.get("thread_fallback"):
         requested_thread_id = send_raw_response.get("requested_thread_id") or t.thread_id
         _note_target_error(
@@ -1573,30 +1505,11 @@ def _live_send_text(
     return True, False, delivered_message_id
 
 
-def _live_send_media(
-    t: _TargetDelivery, media_metadata: dict, media_files: list, delivery_errors: list) -> None:
-    """Send extracted media as native attachments with the same routing as the text send."""
-    routed_media_metadata = dict(media_metadata or {})
-    if t.is_relay:
-        routed_media_metadata["_relay_logical_platform"] = t.platform.value
-        logical_home = t.config.get_home_channel(t.platform)
-        if logical_home is not None and logical_home.chat_id == t.chat_id:
-            if logical_home.user_id:
-                routed_media_metadata["user_id"] = logical_home.user_id
-            if logical_home.scope_id:
-                routed_media_metadata["scope_id"] = logical_home.scope_id
-    _media_errors = _send_media_via_adapter(
-        t.runtime_adapter, t.chat_id, media_files, routed_media_metadata or None, t.loop, t.job,
-        platform=t.platform,
-    )
-    # Surface per-file failures into run status: text delivered but attachment lost is not ok.
-    for _me in _media_errors:
-        delivery_errors.append(f"{_me} (target {t.where})")
-
-
-def _seed_live_delivery_sessions(t: _TargetDelivery, delivered_message_id) -> None:
+def _seed_live_delivery_sessions(t: _TargetDelivery, delivered_message_id, *, delivered=True) -> None:
     """After a confirmed live send, seed continuation session(s) and run the generic mirror.
     Thread seeding is deferred here so open-succeeds/deliver-fails never seeds an unseen brief."""
+    if not delivered:
+        return
     job = t.job
     origin = t.origin
     seed_kwargs = dict(
@@ -1658,6 +1571,7 @@ def _deliver_via_live_adapter(
         # the same platform routing as live messages (Telegram's three-mode topic routing).
         text_to_send = cleaned_text.strip()
         adapter_ok, timed_out, delivered_message_id = True, False, None
+        media_ok = False
         if not text_to_send and not media_files:
             # Fail closed so the run reports the empty payload.
             _note_target_error(
@@ -1680,7 +1594,8 @@ def _deliver_via_live_adapter(
         # payload is already assumed delivered (#38922). Record the skipped attachments so the drop is
         # visible rather than silently lost.
         if adapter_ok and not timed_out and media_files:
-            _live_send_media(t, media_metadata, media_files, delivery_errors)
+            media_ok = _senders._live_send_media(
+                t, media_metadata, media_files, delivery_errors, media_only=not text_to_send)
         elif timed_out and media_files:
             _note_target_error(
                 job,
@@ -1699,80 +1614,13 @@ def _deliver_via_live_adapter(
                 route_thread_id if route_thread_id is not None else "-",
                 delivered_message_id if delivered_message_id is not None else "-")
             delivered = True
-            _seed_live_delivery_sessions(t, delivered_message_id)
+            _seed_live_delivery_sessions(t, delivered_message_id, delivered=bool(text_to_send) or media_ok)
     except Exception as e:
         err_msg = f"live adapter delivery to {t.where} failed: {e}"
         if not any(err_msg in err for err in target_errors):
             target_errors.append(err_msg)
         _warn_live_lane_failure(job, err_msg, t.is_relay)
     return delivered
-
-
-def _standalone_send(
-    t: _TargetDelivery, content: str, media_files: list) -> tuple[Any, Optional[str]]:
-    """Run the standalone sender for one target: ``(result, None)`` or ``(None, error)`` (already
-    logged — WARNING for a shutdown race, ERROR with traceback otherwise)."""
-    from tools.send_message_tool import _send_to_platform
-    job = t.job
-    shutdown_msg = f"delivery to {t.where} skipped — interpreter is shutting down"
-
-    send_timeout = _get_standalone_send_timeout()
-
-    async def _send():
-        # The bound lives inside the coroutine: the running-loop fallback below closes ``coro``
-        # unstarted, and a wait_for wrapper created out here would be left never awaited.
-        return await asyncio.wait_for(_send_to_platform(
-            t.platform, t.pconfig, t.chat_id, content, thread_id=t.thread_id,
-            media_files=media_files), timeout=send_timeout)
-
-    def _warned(msg: str) -> tuple[None, str]:
-        logger.warning("Job '%s': %s", job["id"], msg)
-        return None, msg
-
-    def _failed(e) -> tuple[None, str]:
-        msg = f"delivery to {t.where} failed: {e}"
-        logger.error("Job '%s': %s", job["id"], msg, exc_info=True)
-        return None, msg
-
-    # Interpreter finalizing (SIGTERM/restart/OOM): asyncio.run and a fresh ThreadPoolExecutor both
-    # raise "cannot schedule new futures after interpreter shutdown" — warn, not ERROR traceback.
-    if _sched._interpreter_shutting_down():
-        return _warned(shutdown_msg)
-    # The live lane failed closed on an empty payload; standalone senders don't (Telegram returns
-    # success=True for empty content WITHOUT an API call) — a phantom delivery would result.
-    if not content.strip() and not media_files:
-        return _warned(f"standalone send skipped (empty text and no media) for {t.where}")
-    coro = _send()
-    try:
-        return asyncio.run(coro), None
-    except TimeoutError:
-        # The send may still complete on the gateway loop (the dispatch shield keeps an in-flight
-        # send un-cancelled); the run is released instead of waiting on it unbounded (#115469).
-        msg = (f"standalone send to {t.where} timed out after {send_timeout}s "
-               "(the send may still be in flight)")
-        logger.error("Job '%s': %s", job["id"], msg)
-        return None, msg
-    except RuntimeError as run_err:
-        # asyncio.run() refuses inside a running loop; close the unstarted coro, retry in a thread.
-        coro.close()
-        if _sched._interpreter_shutting_down(run_err):
-            return _warned(shutdown_msg)
-        # The fallback can itself raise (SMTP, result timeout); catch it or remaining targets skip.
-        try:
-            pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-            try:
-                # A fresh thread does NOT inherit the profile ContextVars (home override + secret
-                # scope); run in the active context or the sender reads the default bot token.
-                return pool.submit(contextvars.copy_context().run, asyncio.run, _send()).result(
-                    timeout=30), None
-            finally:
-                pool.shutdown(wait=False)
-        except Exception as e:
-            if _sched._interpreter_shutting_down(e):
-                return _warned(shutdown_msg)
-            return _failed(e)
-    except Exception as e:
-        return _failed(e)
 
 
 def _queue_for_live_reconnect(t: _TargetDelivery, content: str, media_files: list, delivery_errors: list) -> None:
@@ -1815,7 +1663,7 @@ def _deliver_standalone(
             target_errors.append(f"relay delivery to {t.where} failed")
         delivery_errors.extend(target_errors)
         return
-    result, err = _standalone_send(t, content, media_files)
+    result, err = _senders._standalone_send(t, content, media_files)
     if err is None and result and result.get("error"):
         # Not inside an except block — the error comes from the result dict, no traceback.
         err = f"delivery error: {result['error']} (target {t.where})"
@@ -1835,8 +1683,11 @@ def _deliver_standalone(
         delivery_errors.append(msg)
     logger.info("Job '%s': delivered to %s:%s", job["id"], t.platform_name, t.chat_id)
     # Thread seeding only happens on the live lane, so no thread_seeded gate applies here.
+    # DM senders can resolve an email/user target to the room that receives replies.
+    resolved = result if isinstance(result, dict) else {}
     _maybe_mirror_cron_delivery(
-        job, t.platform_name, t.chat_id, t.mirror_text, thread_id=t.thread_id,
+        job, t.platform_name, resolved.get("resolved_chat_id", t.chat_id), t.mirror_text,
+        thread_id=resolved.get("resolved_thread_id", t.thread_id),
         user_id=t.origin_user_id,
         enabled=t.mirror_this_target)
 
@@ -2062,6 +1913,8 @@ def _deliver_result(
     # Independent of the mirror knob: continuable surfaces (in_channel) must seed even when
     # attach_to_session=false and cron.mirror_delivery=false, else the seed gets "" and fails.
     _, mirror_text = BasePlatformAdapter.extract_media(content)
+    from tools.send_message_tool import _describe_media_for_mirror
+    mirror_text = (mirror_text or "").strip() or _describe_media_for_mirror(media_files)
     # Derived from the raw `content`, so it does NOT inherit the redaction above. Without this,
     # enabling the mirror writes an unredacted credential into the session transcript even though
     # the chat message itself was clean — and a transcript outlives the message.
@@ -2128,4 +1981,4 @@ def _deliver_result(
 from cron import scheduler as _sched
 from cron import scheduler_delivery_origin as _origin
 from cron import scheduler_preflight as _preflight
-from cron import scheduler_script as _script
+from cron import scheduler_delivery_senders as _senders

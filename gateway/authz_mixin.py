@@ -160,6 +160,11 @@ def _principal_matches_allowlist(source, user_id: str, allowed_ids: set) -> bool
     """Whether *user_id* (under any platform-specific alias) is in *allowed_ids*."""
     check_ids = {user_id}
 
+    # Webex keeps its authenticated person ID beside the canonical email;
+    # operators may grant either identity without changing session keys.
+    if source.platform == Platform.WEBEX and source.user_id_alt:
+        check_ids.add(source.user_id_alt)
+
     # WhatsApp (Baileys + Cloud): phone<->LID / JID aliases match the same principal.
     if source.platform in {Platform.WHATSAPP, Platform.WHATSAPP_CLOUD}:
         allowed_ids = set().union(*(_expand_whatsapp_auth_aliases(a) for a in allowed_ids)) or allowed_ids
@@ -504,6 +509,8 @@ class GatewayAuthorizationMixin:
         if callable(normalize):
             # Ids and entries may spell the same principal differently (Buzz hex vs npub).
             allowed = {normalize(entry) or entry for entry in allowed}
+        if source.platform == Platform.WEBEX:
+            return "*" in allowed or _principal_matches_allowlist(source, user_id, allowed)
         return _allows(allowed, user_id)
 
     def _adapter_resolved_allowlist_ids(self, source) -> set[str]:

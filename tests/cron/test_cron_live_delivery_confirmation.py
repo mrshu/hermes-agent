@@ -264,11 +264,12 @@ class TestLiveDeliveryIsAFinalNotification:
         media.write_bytes(b"\x89PNG\r\n\x1a\n")
         sent = []
 
-        def fake_send_media(adapter, chat_id, media_files, metadata, loop, job, platform=None):
+        def fake_send_media(adapter, chat_id, media_files, metadata, loop, job, platform=None,
+                            *, delivery_target=None, delivered_media=None):
             sent.append({"media": list(media_files), "metadata": metadata})
             return []
 
-        with patch("cron.scheduler_delivery._send_media_via_adapter", side_effect=fake_send_media), \
+        with patch("cron.scheduler_delivery_senders._send_media_via_adapter", side_effect=fake_send_media), \
              patch("gateway.platforms.base.BasePlatformAdapter.filter_media_delivery_paths",
                    side_effect=lambda files: files):
             error, router_calls, _ = _run(
@@ -304,11 +305,12 @@ class TestNotifyIsConfigurable:
         media.write_bytes(b"\x89PNG\r\n\x1a\n")
         sent = []
 
-        def fake_send_media(adapter, chat_id, media_files, metadata, loop, job, platform=None):
+        def fake_send_media(adapter, chat_id, media_files, metadata, loop, job, platform=None,
+                            *, delivery_target=None, delivered_media=None):
             sent.append(metadata)
             return []
 
-        with patch("cron.scheduler_delivery._send_media_via_adapter", side_effect=fake_send_media), \
+        with patch("cron.scheduler_delivery_senders._send_media_via_adapter", side_effect=fake_send_media), \
              patch("gateway.platforms.base.BasePlatformAdapter.filter_media_delivery_paths",
                    side_effect=lambda files: files):
             _run(
