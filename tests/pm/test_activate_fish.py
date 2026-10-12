@@ -36,6 +36,7 @@ def test_activate_applies_the_environment_and_deactivate_restores_the_shell(tmp_
     run = _fish(root, env, """
         set -gx PYTHONPATH caller-original
         set -gx VIRTUAL_ENV caller-venv
+        set -gx __HERMES_RUNTIME_PYTHON caller-runtime
         set -l original_path (string join : $PATH)
 
         source "@ACTIVATE@"
@@ -54,6 +55,7 @@ def test_activate_applies_the_environment_and_deactivate_restores_the_shell(tmp_
         test (string join : $PATH) = $original_path; or exit 20
         test "$PYTHONPATH" = caller-original; or exit 21
         test "$VIRTUAL_ENV" = caller-venv; or exit 22
+        test "$__HERMES_RUNTIME_PYTHON" = caller-runtime; or exit 28
         set -q __HERMES_ACTIVATED; and exit 23
         set -q HERMES_PM_ACTIVATE_CANARY; and exit 24
         functions -q deactivate; and exit 25

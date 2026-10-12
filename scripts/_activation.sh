@@ -75,7 +75,7 @@ hermes_apply_env() {
     # children. Exported verbatim, bash splits PATH on ':' and finds no commands.
     if [ -n "$cygpath" ]; then
         PATH="$("$cygpath" -u -p "$PATH")"
-        for name in HOME TMPDIR TMP TEMP; do
+        for name in HOME TMPDIR TMP TEMP __HERMES_RUNTIME_PYTHON; do
             if [ -n "${!name-}" ]; then
                 printf -v "$name" '%s' "$("$cygpath" -u "${!name}")"
             fi

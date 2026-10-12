@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import textwrap
 
@@ -34,6 +35,7 @@ def test_bash_cold_sync_changed_input_and_warm_noop(tmp_path, canary):
     script = f'''
         set -e
         export PYTHONPATH=caller-original VIRTUAL_ENV=caller-venv
+        export __HERMES_RUNTIME_PYTHON=caller-runtime
         original_path="$PATH"
         source "{posix(root / 'activate')}"
         printf '%s\\n' "$PYTHONPATH"
@@ -48,6 +50,7 @@ def test_bash_cold_sync_changed_input_and_warm_noop(tmp_path, canary):
         test "$PATH" = "$original_path"
         test "$PYTHONPATH" = caller-original
         test "$VIRTUAL_ENV" = caller-venv
+        test "$__HERMES_RUNTIME_PYTHON" = caller-runtime
         {('test "$HERMES_PM_ACTIVATE_CANARY" = caller-canary' if canary else 'test -z "${HERMES_PM_ACTIVATE_CANARY+set}"')}
         test -z "${{__HERMES_ACTIVATED+set}}"
         ! declare -F deactivate >/dev/null
@@ -92,6 +95,44 @@ def test_bash_setup_failure_preserves_caller(tmp_path, already_active):
     calls = (root / "calls.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(calls) == (2 if already_active else 1)
     assert json.loads(calls[-1])["python_env"] == dict.fromkeys(("PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV"))
+
+
+@pytest.mark.platforms("posix")
+def test_zsh_activation_restores_composed_keys_without_changing_shell_options(tmp_path):
+    zsh = shutil.which("zsh")
+    if zsh is None:
+        pytest.skip("zsh is not installed")
+    root, env = sync_checkout(tmp_path)
+    fake_store(tmp_path)
+    subdir = root / "working directory"
+    subdir.mkdir()
+    script = '''
+        export PYTHONPATH=caller-original VIRTUAL_ENV=caller-venv
+        export __HERMES_RUNTIME_PYTHON=caller-runtime HERMES_PM_ACTIVATE_CANARY=caller-canary
+        original_path="$PATH"
+        original_options="$(setopt)"
+        source "@ACTIVATE@" || exit 10
+        test "$HERMES_PM_ACTIVATE_CANARY" = env-ok || exit 11
+        test "$__HERMES_RUNTIME_PYTHON" != caller-runtime || exit 12
+        source "@ACTIVATE@" || exit 22
+        deactivate || exit 13
+        test "$PATH" = "$original_path" || exit 14
+        test "$PYTHONPATH" = caller-original || exit 15
+        test "$VIRTUAL_ENV" = caller-venv || exit 16
+        test "$__HERMES_RUNTIME_PYTHON" = caller-runtime || exit 17
+        test "$HERMES_PM_ACTIVATE_CANARY" = caller-canary || exit 18
+        test -z "${__HERMES_ACTIVATED+set}" || exit 19
+        test "$(setopt)" = "$original_options" || exit 20
+        (( ! $+functions[hermes] && ! $+functions[deactivate] )) || exit 21
+        printf restored
+    '''
+    run = subprocess.run(
+        [zsh, "-f", "-c", script.replace("@ACTIVATE@", posix(root / "activate"))],
+        cwd=subdir, env=env, capture_output=True,
+        text=True, timeout=60, check=False,
+    )
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert run.stdout == "restored"
 
 
 @pytest.mark.platforms("windows")

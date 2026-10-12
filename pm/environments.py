@@ -514,6 +514,9 @@ def activate_dependencies(project_root: Path) -> None:
 
 def activation_environment(project_root: Path) -> dict[str, str]:
     """Read the installed PM environment; do not provision or switch imports."""
+    import sys
+
+    from hermes_cli._launchers import resolve_store_python
     from pm.install import env_for
     from pm.registry import all_packages
 
@@ -531,6 +534,8 @@ def activation_environment(project_root: Path) -> dict[str, str]:
     # directory also holds activation_inputs_dir, the input-mtime stamps
     # `scripts/_activation.sh` compares against to decide staleness.
     env["__HERMES_ACTIVATED"] = str(runtime_facts_path(project_root))
+    # Native dependencies belong to the store interpreter, not an older checkout venv.
+    env["__HERMES_RUNTIME_PYTHON"] = str(resolve_store_python(project_root) or sys.executable)
     # The suite's interpreter (pm.testenv): an isolated side environment, so it
     # never appears on PYTHONPATH/PATH above. scripts/run_tests.sh reads it.
     from pm.testenv import testenv_python

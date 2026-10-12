@@ -112,14 +112,7 @@ function global:hermes {
     Push-Location -LiteralPath $global:_hermesWorktree
     try {
         $py = $env:PYTHON
-        if (-not $py) {
-            foreach ($candidate in @(
-                '.venv\Scripts\python.exe', 'venv\Scripts\python.exe',
-                '.venv\bin\python', 'venv\bin\python'
-            )) {
-                if (Test-Path -LiteralPath $candidate) { $py = $candidate; break }
-            }
-        }
+        if (-not $py) { $py = $env:__HERMES_RUNTIME_PYTHON }
         if (-not $py) { $py = 'python' }
         & $py hermes @args
     } finally {

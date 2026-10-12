@@ -109,6 +109,8 @@ def test_activate_leaves_the_shell_paths_in_posix_form(tmp_path: Path):
         f'source "{posix(root / "activate")}" && '
         'command -v basename >/dev/null && '
         'case "$PATH" in *";"*|*"\\\\"*) exit 3;; esac && '
+        'test -x "$__HERMES_RUNTIME_PYTHON" && '
+        'case "$__HERMES_RUNTIME_PYTHON" in *"\\\\"*) exit 4;; esac && '
         'test "$HOME" = "$prior_home" && test "$TMP" = "$prior_tmp" && '
         'echo posix'
     )

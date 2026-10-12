@@ -70,12 +70,10 @@ function hermes --description 'hermes of the activated checkout'
         return 1
     end
     set -l python python
-    if set -q PYTHON
+    if set -q PYTHON; and test -n "$PYTHON"
         set python $PYTHON
-    else if test -x $__hermes_worktree/.venv/bin/python
-        set python $__hermes_worktree/.venv/bin/python
-    else if test -x $__hermes_worktree/venv/bin/python
-        set python $__hermes_worktree/venv/bin/python
+    else if set -q __HERMES_RUNTIME_PYTHON
+        set python $__HERMES_RUNTIME_PYTHON
     end
     pushd $__hermes_worktree >/dev/null
     $python hermes $argv

@@ -21,7 +21,14 @@
 # recorded tool digest instead of re-hashing every entry. `hermes pm
 # install` and `hermes update` keep that check.
 # ============================================================================
-_HERMES_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# zsh exposes the sourced file through prompt expansion rather than BASH_SOURCE.
+if [ -n "${ZSH_VERSION-}" ]; then
+    eval '_HERMES_SOURCE="${(%):-%x}"'
+else
+    _HERMES_SOURCE="${BASH_SOURCE[0]}"
+fi
+_HERMES_REPO="$(cd "$(dirname "$_HERMES_SOURCE")" && pwd)"
+unset _HERMES_SOURCE
 # Options: `--test-extras a,b` selects the test environment's runtime extras
 # (default: [all]); `--` ends options.
 # A bare `source ./activate` inherits the caller's positional parameters.
@@ -62,23 +69,27 @@ unset _hermes_test_env
 # no-op re-save; we keep it idempotent by deactivating first). Key on the
 # function, not the sentinel: child shells inherit __HERMES_ACTIVATED from an
 # activated parent but never the function, and there is nothing to undo there.
-if [ "$(type -t deactivate 2>/dev/null)" = "function" ]; then
+if typeset -f deactivate >/dev/null 2>&1; then
     deactivate
 fi
 
-_hermes_script="$(hermes_compose_env "$_HERMES_REPO" sh)" || {
+# Compose under Bash, as activate.fish does, so absent runtime globs stay harmless in zsh.
+_hermes_script="$(bash -c '. "$1/scripts/_activation.sh"; hermes_compose_env "$1" sh' _ "$_HERMES_REPO")" || {
     echo "activate: could not compose the environment (see above)" >&2
     unset _hermes_script
     return 1 2>/dev/null || exit 1
 }
-_hermes_keys="$(printf '%s\n' "$_hermes_script" | sed -n 's/^export \([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' | tr '\n' ' ')"
+_hermes_keys=()
+while IFS= read -r _hermes_k; do
+    _hermes_keys+=("$_hermes_k")
+done < <(printf '%s\n' "$_hermes_script" | sed -n 's/^export \([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p')
 
 # --- snapshot what we are about to change (deactivate restores this) ---
 # __HERMES_ACTIVATED is part of the composed env below (it carries the
 # installed-state path this environment was built from), so it is snapshotted
 # and exported with every other key — no separate assignment here.
 __HERMES_SAVED_PATH="$PATH"
-for _hermes_k in $_hermes_keys; do
+for _hermes_k in "${_hermes_keys[@]}"; do
     eval "__HERMES_SAVED_$_hermes_k=\"\${$_hermes_k+set}\""
     eval "__HERMES_PRIOR_$_hermes_k=\${$_hermes_k-__HERMES_UNSET__}"
 done
@@ -107,19 +118,7 @@ hermes() {
     }
     (
         cd "$__HERMES_WORKTREE" || exit 1
-        if [ -n "${PYTHON-}" ]; then
-            exec "$PYTHON" hermes "$@"
-        elif [ -x .venv/Scripts/python.exe ]; then
-            exec .venv/Scripts/python.exe hermes "$@"
-        elif [ -x .venv/bin/python ]; then
-            exec .venv/bin/python hermes "$@"
-        elif [ -x venv/Scripts/python.exe ]; then
-            exec venv/Scripts/python.exe hermes "$@"
-        elif [ -x venv/bin/python ]; then
-            exec venv/bin/python hermes "$@"
-        else
-            exec python hermes "$@"
-        fi
+        exec "${PYTHON:-${__HERMES_RUNTIME_PYTHON:-python}}" hermes "$@"
     )
 }
 
@@ -145,7 +144,7 @@ _hermes_prompt
 
 deactivate() {
     export PATH="$__HERMES_SAVED_PATH"
-    for _hermes_k in $__HERMES_KEY_LIST; do
+    for _hermes_k in "${__HERMES_KEY_LIST[@]}"; do
         eval "_hermes_was=\"\$__HERMES_SAVED_$_hermes_k\""
         eval "_hermes_old=\"\$__HERMES_PRIOR_$_hermes_k\""
         if [ "$_hermes_was" != "set" ]; then
@@ -173,7 +172,7 @@ deactivate() {
 }
 
 # remember the key list for deactivate (kept out of the loop vars above)
-__HERMES_KEY_LIST="$_hermes_keys"
+__HERMES_KEY_LIST=("${_hermes_keys[@]}")
 
 # The composition library is not part of the user's shell.
 unset -f hermes_sync hermes_bootstrap_python hermes_compose_env hermes_apply_env \
