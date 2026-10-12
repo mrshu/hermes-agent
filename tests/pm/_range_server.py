@@ -11,9 +11,15 @@ from __future__ import annotations
 import hashlib
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
+
+
+class RangeServer(ThreadingHTTPServer):
+    # Eight range writers need concurrent responses and room in the accept
+    # queue; a serialized server with backlog five resets requests on macOS.
+    request_queue_size = 16
 
 
 class RangeHandler(BaseHTTPRequestHandler):
@@ -110,7 +116,7 @@ def dl_server():
     RangeHandler.no_range = False
     RangeHandler.etags = True
     RangeHandler.chunk = 1 << 20
-    server = HTTPServer(("127.0.0.1", 0), RangeHandler)
+    server = RangeServer(("127.0.0.1", 0), RangeHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
